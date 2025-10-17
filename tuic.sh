@@ -186,6 +186,4 @@ EOF
 else
   echo "未检测到 systemd，使用 rc.local 启动 TUIC"
   if ! grep -q "tuic-server" /etc/rc.local 2>/dev/null; then
-    echo "$WORK_DIR/tuic-server -c $CONFIG_FILE &" >> /etc/rc.local
-  fi
-  chmod +x /etc
+    echo "$WORK_DIR/tuic-server

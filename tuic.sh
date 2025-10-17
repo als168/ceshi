@@ -6,11 +6,72 @@ WORK_DIR="$CERT_DIR"
 CONFIG_FILE="$WORK_DIR/config.json"
 USER_FILE="$WORK_DIR/tuic_user.txt"
 LINK_FILE="$WORK_DIR/tuic-links.txt"
+SERVICE="tuic"
 
 MASQ_DOMAINS=("www.microsoft.com" "www.cloudflare.com" "www.bing.com" "www.apple.com" "www.amazon.com" "www.wikipedia.org")
 FAKE_DOMAIN=${MASQ_DOMAINS[$RANDOM % ${#MASQ_DOMAINS[@]}]}
 
 mkdir -p "$WORK_DIR"
+
+# ---------------- 管理菜单 ----------------
+if [ -x "$WORK_DIR/tuic-server" ]; then
+  echo "---------------------------------------"
+  echo " TUIC 管理菜单"
+  echo "---------------------------------------"
+  echo "1) 修改端口"
+  echo "2) 重启服务"
+  echo "3) 查看节点信息"
+  echo "4) 卸载 TUIC"
+  echo "5) 退出"
+  read -p "请输入选项 [1-5]: " choice
+
+  case "$choice" in
+    1)
+      read -p "请输入新的端口号: " NEW_PORT
+      [ -z "$NEW_PORT" ] && echo "❌ 端口不能为空" && exit 1
+      sed -i "s/\"server\": \".*\"/\"server\": \"[::]:$NEW_PORT\"/" "$CONFIG_FILE"
+      if command -v systemctl >/dev/null 2>&1; then
+        systemctl restart $SERVICE
+      else
+        pkill -f "$WORK_DIR/tuic-server" || true
+        nohup $WORK_DIR/tuic-server -c $CONFIG_FILE >/dev/null 2>&1 &
+      fi
+      echo "✅ 端口已修改为 $NEW_PORT 并已重启服务"
+      exit 0
+      ;;
+    2)
+      if command -v systemctl >/dev/null 2>&1; then
+        systemctl restart $SERVICE
+      else
+        pkill -f "$WORK_DIR/tuic-server" || true
+        nohup $WORK_DIR/tuic-server -c $CONFIG_FILE >/dev/null 2>&1 &
+      fi
+      echo "✅ TUIC 服务已重启"
+      exit 0
+      ;;
+    3)
+      cat "$LINK_FILE"
+      exit 0
+      ;;
+    4)
+      echo "正在卸载 TUIC..."
+      if command -v systemctl >/dev/null 2>&1; then
+        systemctl stop $SERVICE || true
+        systemctl disable $SERVICE || true
+        rm -f /etc/systemd/system/$SERVICE.service
+        systemctl daemon-reload
+      else
+        sed -i '/tuic-server/d' /etc/rc.local || true
+        pkill -f "$WORK_DIR/tuic-server" || true
+      fi
+      rm -rf "$WORK_DIR"
+      echo "✅ TUIC 已卸载完成"
+      exit 0
+      ;;
+    5) echo "已退出"; exit 0 ;;
+    *) echo "无效选项"; exit 1 ;;
+  esac
+fi
 
 # ---------------- 用户信息持久化 ----------------
 if [ -f "$USER_FILE" ]; then
@@ -45,9 +106,25 @@ if [ ! -f "$CERT_PEM" ] || ! openssl x509 -checkend 0 -noout -in "$CERT_PEM" >/d
     -keyout "$KEY_PEM" -out "$CERT_PEM" -subj "/CN=$FAKE_DOMAIN" -days 825 -nodes >/dev/null 2>&1
 fi
 
+# ---------------- 拥塞控制算法检测 ----------------
+detect_cc_algo() {
+  if sysctl net.ipv4.tcp_available_congestion_control >/dev/null 2>&1; then
+    SUPPORTED=$(sysctl -n net.ipv4.tcp_available_congestion_control)
+  else
+    SUPPORTED="cubic reno"
+  fi
+  if echo "$SUPPORTED" | grep -qw "bbr2"; then
+    CC_ALGO="bbr2"
+  elif echo "$SUPPORTED" | grep -qw "bbr"; then
+    CC_ALGO="bbr"
+  else
+    CC_ALGO="cubic"
+  fi
+}
+detect_cc_algo
+
 # ---------------- 生成配置 ----------------
 PORT=$(shuf -i 20000-60000 -n 1)
-CC_ALGO="bbr"
 cat > $CONFIG_FILE <<EOF
 {
   "server": "[::]:$PORT",
@@ -62,14 +139,29 @@ cat > $CONFIG_FILE <<EOF
 EOF
 
 # ---------------- 输出链接 ----------------
-IPV4=$(curl -s ipv4.icanhazip.com)
-COUNTRY=$(curl -s "http://ip-api.com/line/${IPV4}?fields=countryCode" || echo "XX")
+IPV4=$(curl -s ipv4.icanhazip.com || true)
+IPV6=$(curl -s ipv6.icanhazip.com || true)
 ENC_PASS=$(printf '%s' "$PASS" | jq -s -R -r @uri)
 ENC_SNI=$(printf '%s' "$FAKE_DOMAIN" | jq -s -R -r @uri)
 
-LINK="tuic://$UUID:$ENC_PASS@$IPV4:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=$CC_ALGO#TUIC-${COUNTRY}-IPv4-$CC_ALGO"
+> "$LINK_FILE"
 
-echo "$LINK" > "$LINK_FILE"
+if [ -n "$IPV6" ]; then
+  COUNTRY6=$(curl -s "http://ip-api.com/line/${IPV6}?fields=countryCode" || true)
+  [ -z "$COUNTRY6" ] && COUNTRY6="XX"
+  LINK6="tuic://$UUID:$ENC_PASS@[$IPV6]:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=$CC_ALGO#TUIC-${COUNTRY6}-IPv6-$CC_ALGO"
+  echo "$LINK6" >> "$LINK_FILE"
+  echo "IPv6 节点: $LINK6"
+fi
+
+if [ -n "$IPV4" ]; then
+  COUNTRY4=$(curl -s "http://ip-api.com/line/${IPV4}?fields=countryCode" || true)
+  [ -z "$COUNTRY4" ] && COUNTRY4="XX"
+  LINK4="tuic://$UUID:$ENC_PASS@$IPV4:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=$CC_ALGO#TUIC-${COUNTRY4}-IPv4-$CC_ALGO"
+  echo "$LINK4" >> "$LINK_FILE"
+  echo "IPv4 节点: $LINK4"
+fi
+
 ln -sf "$LINK_FILE" /root/tuic-links.txt
 
 # ---------------- v2rayN 配置 ----------------
@@ -78,7 +170,7 @@ cat > "$WORK_DIR/v2rayn-tuic.json" <<EOF
   "protocol": "tuic",
   "tag": "TUIC-$CC_ALGO",
   "settings": {
-    "server": "$IPV4",
+    "server": "${IPV6:-$IPV4}",
     "server_port": $PORT,
     "uuid": "$UUID",
     "password": "$PASS",
@@ -92,38 +184,9 @@ EOF
 # ---------------- Clash Meta 配置 ----------------
 cat > "$WORK_DIR/clash-tuic.yaml" <<EOF
 proxies:
-  - name: "TUIC-${COUNTRY}-${CC_ALGO}"
+  - name: "TUIC-${CC_ALGO}"
     type: tuic
-    server: $IPV4
+    server: ${IPV6:-$IPV4}
     port: $PORT
     uuid: "$UUID"
     password: "$PASS"
-    alpn: ["h3"]
-    sni: "$FAKE_DOMAIN"
-    congestion_control: $CC_ALGO
-    udp_relay_mode: native
-    skip-cert-verify: true
-    disable_sni: false
-    reduce_rtt: true
-EOF
-
-# ---------------- systemd 服务 ----------------
-cat > /etc/systemd/system/tuic.service <<EOF
-[Unit]
-Description=TUIC Server
-After=network.target
-
-[Service]
-ExecStart=$WORK_DIR/tuic-server -c $CONFIG_FILE
-Restart=on-failure
-LimitNOFILE=65535
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl daemon-reload
-systemctl enable --now tuic
-
-echo "✅ 安装完成，节点信息已保存到: $LINK_FILE"
-echo "快捷访问: ~/tuic-links.txt"

@@ -141,38 +141,32 @@ chmod +x $SERVICE_FILE
 rc-update add tuic default
 rc-service tuic restart
 
-# ===== 获取公网 IP =====
-IPV4=$(wget -qO- -T 5 ipv4.icanhazip.com)
-IPV6=$(wget -qO- -T 5 ipv6.icanhazip.com)
-[ -n "$IPV6" ] && IP6_URI="[$IPV6]"
-
-# ===== URI 编码 =====
+# ---------------- 输出链接 ----------------
+IPV4=$(curl -s ipv4.icanhazip.com || true)
+IPV6=$(curl -s ipv6.icanhazip.com || true)
 ENC_PASS=$(printf '%s' "$PASS" | jq -s -R -r @uri)
 ENC_SNI=$(printf '%s' "$FAKE_DOMAIN" | jq -s -R -r @uri)
 
-# ===== 输出单节点链接 =====
 LINK_FILE="$CERT_DIR/tuic-links.txt"
-{
-  echo "UUID: $UUID"
-  echo "密码: $PASS"
-  echo "SNI: $FAKE_DOMAIN"
-  echo "端口: $PORT"
-  echo "拥塞算法: $CC_ALGO"
-} > $LINK_FILE
-
-if [ -n "$IPV4" ]; then
-  LINK4="tuic://$UUID:$ENC_PASS@$IPV4:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=$CC_ALGO#TUIC-IPv4-$CC_ALGO"
-  echo "单节点链接 (IPv4): $LINK4"
-  echo "$LINK4" >> $LINK_FILE
-fi
+> "$LINK_FILE"
 
 if [ -n "$IPV6" ]; then
-  LINK6="tuic://$UUID:$ENC_PASS@$IP6_URI:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=$CC_ALGO#TUIC-IPv6-$CC_ALGO"
-  echo "单节点链接 (IPv6): $LINK6"
-  echo "$LINK6" >> $LINK_FILE
+  COUNTRY6=$(curl -s "http://ip-api.com/line/${IPV6}?fields=countryCode" || true)
+  [ -z "$COUNTRY6" ] && COUNTRY6="XX"
+  LINK6="tuic://$UUID:$ENC_PASS@[$IPV6]:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=$CC_ALGO#TUIC-${COUNTRY6}-IPv6-$CC_ALGO"
+  echo "$LINK6" >> "$LINK_FILE"
+  echo "IPv6 节点: $LINK6"
 fi
 
-ln -sf $LINK_FILE /root/tuic-links.txt
+if [ -n "$IPV4" ]; then
+  COUNTRY4=$(curl -s "http://ip-api.com/line/${IPV4}?fields=countryCode" || true)
+  [ -z "$COUNTRY4" ] && COUNTRY4="XX"
+  LINK4="tuic://$UUID:$ENC_PASS@$IPV4:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=$CC_ALGO#TUIC-${COUNTRY4}-IPv4-$CC_ALGO"
+  echo "$LINK4" >> "$LINK_FILE"
+  echo "IPv4 节点: $LINK4"
+fi
+
+ln -sf "$LINK_FILE" /root/tuic-links.txt
 echo "✅ 所有链接已保存到: $LINK_FILE"
 echo "快捷访问: ~/tuic-links.txt"
 
@@ -201,5 +195,3 @@ EOF
 CLASH_FILE="$CERT_DIR/clash-tuic.yaml"
 cat > $CLASH_FILE <<EOF
 proxies:
-  - name: "TUIC-${CC_ALGO}"
-    type: tuic

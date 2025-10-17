@@ -58,15 +58,86 @@ echo "---------------------------------------"
 apk add --no-cache wget curl openssl openrc lsof coreutils jq file >/dev/null
 apk add --no-cache aria2 >/dev/null || true
 
-# 下载 TUIC 二进制（省略，保持你之前的逻辑）
-# ...（此处保留完整安装逻辑，包括证书生成、UUID、配置文件、OpenRC 服务等）
+# ===== 下载 TUIC 二进制 =====
+TAG=$(curl -s https://api.github.com/repos/tuic-protocol/tuic/releases/latest | jq -r .tag_name)
+[ -z "$TAG" ] || [ "$TAG" = "null" ] && TAG="tuic-server-1.0.0"
+VERSION=${TAG#tuic-server-}
+FILENAME="tuic-server-${VERSION}-x86_64-unknown-linux-musl"
 
-# ===== 获取 IPv4/IPv6 =====
+URLS="
+https://github.com/tuic-protocol/tuic/releases/download/$TAG/$FILENAME
+https://mirror.ghproxy.com/https://github.com/tuic-protocol/tuic/releases/download/$TAG/$FILENAME
+"
+
+SUCCESS=0
+for url in $URLS; do
+  echo "尝试下载: $url"
+  rm -f /tmp/tuic_temp*
+  wget --timeout=30 --tries=3 -O /tmp/tuic_temp "$url" || continue
+  FILE_TYPE=$(file /tmp/tuic_temp)
+  if echo "$FILE_TYPE" | grep -q "ELF"; then
+    mv /tmp/tuic_temp $TUIC_BIN
+    chmod +x $TUIC_BIN
+    SUCCESS=1
+    break
+  fi
+done
+[ $SUCCESS -eq 0 ] && echo "❌ 下载失败" && exit 1
+
+# ===== 证书处理 =====
+mkdir -p $CERT_DIR
+read -p "请输入证书 (.crt) 文件绝对路径 (回车则生成自签证书): " CERT_PATH
+if [ -z "$CERT_PATH" ]; then
+  read -p "请输入伪装域名 (默认 www.bing.com): " FAKE_DOMAIN
+  [ -z "$FAKE_DOMAIN" ] && FAKE_DOMAIN="www.bing.com"
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout $CERT_DIR/key.pem -out $CERT_DIR/cert.pem -days 365 \
+    -subj "/CN=$FAKE_DOMAIN"
+  CERT_PATH="$CERT_DIR/cert.pem"
+  KEY_PATH="$CERT_DIR/key.pem"
+else
+  read -p "请输入私钥 (.key) 文件绝对路径: " KEY_PATH
+  read -p "请输入证书域名 (SNI): " FAKE_DOMAIN
+fi
+
+# ===== 生成配置 =====
+UUID=$(cat /proc/sys/kernel/random/uuid)
+PASS=$(openssl rand -base64 16)
+read -p "请输入 TUIC 端口 (默认 28543): " PORT
+[ -z "$PORT" ] && PORT=28543
+
+cat > $CONFIG_FILE <<EOF
+{
+  "server": "[::]:$PORT",
+  "users": {
+    "$UUID": "$PASS"
+  },
+  "certificate": "$CERT_PATH",
+  "private_key": "$KEY_PATH",
+  "alpn": ["h3"],
+  "congestion_control": "bbr"
+}
+EOF
+
+# ===== OpenRC 服务 =====
+cat > $SERVICE_FILE <<'EOF'
+#!/sbin/openrc-run
+description="TUIC v5 Service"
+command="/usr/local/bin/tuic"
+command_args="--config /etc/tuic/config.json"
+command_background="yes"
+pidfile="/run/tuic.pid"
+depend() { need net; }
+EOF
+
+chmod +x $SERVICE_FILE
+rc-update add tuic default
+rc-service tuic restart
+
+# ===== 获取公网 IP =====
 IPV4=$(wget -qO- -T 5 ipv4.icanhazip.com)
 IPV6=$(wget -qO- -T 5 ipv6.icanhazip.com)
 [ -n "$IPV6" ] && IP6_URI="[$IPV6]"
 
-# ===== 输出订阅链接 =====
 ENC_PASS=$(printf '%s' "$PASS" | jq -s -R -r @uri)
 ENC_SNI=$(printf '%s' "$FAKE_DOMAIN" | jq -s -R -r @uri)
 

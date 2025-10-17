@@ -146,20 +146,40 @@ IPV6=$(wget -qO- -T 5 ipv6.icanhazip.com)
 ENC_PASS=$(printf '%s' "$PASS" | jq -s -R -r @uri)
 ENC_SNI=$(printf '%s' "$FAKE_DOMAIN" | jq -s -R -r @uri)
 
-# ===== 输出订阅链接 =====
+# ===== 输出单节点链接（带算法参数） =====
+LINK_FILE="$CERT_DIR/tuic-links.txt"
 echo "------------------------------------------------------------------------"
 echo "UUID: $UUID"
 echo "密码: $PASS"
 echo "SNI: $FAKE_DOMAIN"
 echo "端口: $PORT"
 echo "拥塞算法: $CC_ALGO"
-[ -n "$IPV4" ] && echo "tuic://$UUID:$ENC_PASS@$IPV4:$PORT?sni=$ENC_SNI&alpn=h3#TUIC节点-IPv4"
-[ -n "$IPV6" ] && echo "tuic://$UUID:$ENC_PASS@$IP6_URI:$PORT?sni=$ENC_SNI&alpn=h3#TUIC节点-IPv6"
-echo "------------------------------------------------------------------------"
+{
+  echo "UUID: $UUID"
+  echo "密码: $PASS"
+  echo "SNI: $FAKE_DOMAIN"
+  echo "端口: $PORT"
+  echo "拥塞算法: $CC_ALGO"
+} > $LINK_FILE
 
-# ===== v2rayN 导入链接 =====
-echo "v2rayN 导入链接:"
-echo "tuic://$UUID:$ENC_PASS@${IPV4:-$IPV6}:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=$CC_ALGO#TUIC-$CC_ALGO"
+if [ -n "$IPV4" ]; then
+  LINK4="tuic://$UUID:$ENC_PASS@$IPV4:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=$CC_ALGO#TUIC-IPv4-$CC_ALGO"
+  echo "单节点链接 (IPv4): $LINK4"
+  echo "$LINK4" >> $LINK_FILE
+fi
+
+if [ -n "$IPV6" ]; then
+  LINK6="tuic://$UUID:$ENC_PASS@$IP6_URI:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=$CC_ALGO#TUIC-IPv6-$CC_ALGO"
+  echo "单节点链接 (IPv6): $LINK6"
+  echo "$LINK6" >> $LINK_FILE
+fi
+
+echo "------------------------------------------------------------------------"
+echo "所有链接已保存到: $LINK_FILE"
+
+# 在 root 目录下创建软链接，方便快速访问
+ln -sf $LINK_FILE /root/tuic-links.txt
+echo "快捷访问: ~/tuic-links.txt"
 
 # ===== 生成 v2rayN 节点配置 =====
 V2RAYN_FILE="$CERT_DIR/v2rayn-tuic.json"
@@ -177,21 +197,4 @@ cat > $V2RAYN_FILE <<EOF
     "sni": "$FAKE_DOMAIN",
     "udp_relay_mode": "native",
     "disable_sni": false,
-    "reduce_rtt": true
-  }
-}
-EOF
-echo "v2rayN 节点配置文件已生成: $V2RAYN_FILE"
-
-# ===== 生成 Clash Meta 节点配置 =====
-CLASH_FILE="$CERT_DIR/clash-tuic.yaml"
-cat > $CLASH_FILE <<EOF
-proxies:
-  - name: "TUIC-$CC_ALGO"
-    type: tuic
-    server: ${IPV4:-$IPV6}
-    port: $PORT
-    uuid: "$UUID"
-    password: "$PASS"
-    alpn: ["h3"]
-    sni
+    "reduce_rtt":

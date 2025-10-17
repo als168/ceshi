@@ -45,13 +45,14 @@ generate_config() {
 
 
 validate_config() {
-    grep -q '
+    grep -q '^
 
 \[users\]
 
-' "$SERVER_TOML" || { echo "❌ 配置文件缺少 [users] 部分"; exit 1; }
+$' "$SERVER_TOML" || { echo "❌ 配置文件缺少 [users] 部分"; exit 1; }
     grep -q "$CERT_PEM" "$SERVER_TOML" || { echo "❌ TLS 证书路径未正确写入配置"; exit 1; }
 }
+
 
 generate_links() {
     UUID=$(sed -n '1p' "$USER_FILE")

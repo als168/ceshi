@@ -181,17 +181,4 @@ cat > $V2RAYN_FILE <<EOF
     "server_port": $PORT,
     "uuid": "$UUID",
     "password": "$PASS",
-    "congestion_control": "$CC_ALGO",
-    "alpn": ["h3"],
-    "sni": "$FAKE_DOMAIN",
-    "udp_relay_mode": "native",
-    "disable_sni": false,
-    "reduce_rtt": true
-  }
-}
-EOF
-
-# ===== 生成 Clash Meta 配置 =====
-CLASH_FILE="$CERT_DIR/clash-tuic.yaml"
-cat > $CLASH_FILE <<EOF
-proxies:
+    "con

@@ -164,29 +164,28 @@ fi
 
 ln -sf "$LINK_FILE" /root/tuic-links.txt
 
-# ---------------- v2rayN 配置 ----------------
-cat > "$WORK_DIR/v2rayn-tuic.json" <<EOF
-{
-  "protocol": "tuic",
-  "tag": "TUIC-$CC_ALGO",
-  "settings": {
-    "server": "${IPV6:-$IPV4}",
-    "server_port": $PORT,
-    "uuid": "$UUID",
-    "password": "$PASS",
-    "congestion_control": "$CC_ALGO",
-    "alpn": ["h3"],
-    "sni": "$FAKE_DOMAIN"
-  }
-}
-EOF
+# ---------------- 服务管理 ----------------
+if command -v systemctl >/dev/null 2>&1; then
+  echo "检测到 systemd，使用 systemd 管理 TUIC 服务"
+  mkdir -p /etc/systemd/system
+  cat > /etc/systemd/system/$SERVICE.service <<EOF
+[Unit]
+Description=TUIC Server
+After=network.target
 
-# ---------------- Clash Meta 配置 ----------------
-cat > "$WORK_DIR/clash-tuic.yaml" <<EOF
-proxies:
-  - name: "TUIC-${CC_ALGO}"
-    type: tuic
-    server: ${IPV6:-$IPV4}
-    port: $PORT
-    uuid: "$UUID"
-    password: "$PASS"
+[Service]
+ExecStart=$WORK_DIR/tuic-server -c $CONFIG_FILE
+Restart=on-failure
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now $SERVICE
+else
+  echo "未检测到 systemd，使用 rc.local 启动 TUIC"
+  if ! grep -q "tuic-server" /etc/rc.local 2>/dev/null; then
+    echo "$WORK_DIR/tuic-server -c $CONFIG_FILE &" >> /etc/rc.local
+  fi
+  chmod +x /etc

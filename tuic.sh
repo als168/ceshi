@@ -202,8 +202,26 @@ EOF
         echo "🚀 未检测到 OpenRC 或 systemd，前台运行 TUIC..."
         exec "$TUIC_BIN" -c "$SERVER_JSON"
     fi
-    echo "✅ TUIC 服务已启动"
+
+    # 检查是否启动成功
+    sleep 2
+    if ! pgrep -x tuic-server >/dev/null 2>&1; then
+        echo "⚠️ TUIC 启动失败，可能端口被占用，尝试更换端口..."
+        PORT="$(find_free_port)"
+        generate_config
+        generate_links
+        export_clients
+        if command -v rc-service >/dev/null 2>&1; then
+            rc-service tuic restart
+        elif command -v systemctl >/dev/null 2>&1; then
+            systemctl restart tuic
+        fi
+        echo "✅ 已自动切换到新端口：$PORT"
+    else
+        echo "✅ TUIC 服务已启动"
+    fi
 }
+
 
 modify_port() {
     local new_port

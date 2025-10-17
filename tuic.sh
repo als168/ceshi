@@ -5,15 +5,37 @@ IFS=$'\n\t'
 WORK_DIR="/etc/tuic"
 mkdir -p "$WORK_DIR"
 
-MASQ_DOMAINS=("www.microsoft.com" "www.cloudflare.com" "www.bing.com" "www.apple.com" "www.amazon.com")
-MASQ_DOMAIN=${MASQ_DOMAINS[$RANDOM % ${#MASQ_DOMAINS[@]}]}
 TUIC_BIN="$WORK_DIR/tuic-server"
 SERVER_JSON="$WORK_DIR/server.json"
 CERT_PEM="$WORK_DIR/tuic-cert.pem"
 KEY_PEM="$WORK_DIR/tuic-key.pem"
 USER_FILE="$WORK_DIR/tuic_user.txt"
 LINK_FILE="$WORK_DIR/tuic-link.txt"
-PORT="28888"
+
+MASQ_DOMAINS=(
+  "www.microsoft.com"
+  "www.cloudflare.com"
+  "www.bing.com"
+  "www.apple.com"
+  "www.amazon.com"
+  "www.google.com"
+  "www.youtube.com"
+  "www.facebook.com"
+  "www.yahoo.com"
+  "www.wikipedia.org"
+)
+
+read -p "请输入监听端口（默认 28888）: " INPUT_PORT
+PORT="${INPUT_PORT:-28888}"
+
+echo "请选择拥塞控制算法："
+select ALGO in "bbr" "bbr2" "cubic"; do
+    CONGESTION="$ALGO"
+    break
+done
+
+MASQ_DOMAIN=${MASQ_DOMAINS[$RANDOM % ${#MASQ_DOMAINS[@]}]}
+echo "🎭 已随机选择伪装域名：$MASQ_DOMAIN"
 
 generate_certificate() {
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
@@ -47,16 +69,11 @@ generate_config() {
   },
   "certificate": "$CERT_PEM",
   "private_key": "$KEY_PEM",
-  "congestion_control": "bbr",
+  "congestion_control": "$CONGESTION",
   "alpn": ["h3"],
   "log_level": "info"
 }
 EOF
-}
-
-validate_config() {
-    jq -e '.users' "$SERVER_JSON" >/dev/null || { echo "❌ 配置文件缺少 users 部分"; exit 1; }
-    grep -q "$CERT_PEM" "$SERVER_JSON" || { echo "❌ TLS 证书路径未正确写入配置"; exit 1; }
 }
 
 generate_links() {
@@ -78,13 +95,13 @@ generate_links() {
 
     if [[ -n "$IPV4" ]]; then
         COUNTRY=$(detect_country "$IPV4")
-        LINK="tuic://$UUID:$ENC_PASS@$IPV4:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=bbr#TUIC-IPv4-${COUNTRY}"
+        LINK="tuic://$UUID:$ENC_PASS@$IPV4:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=$CONGESTION#TUIC-IPv4-${COUNTRY}"
         echo "$LINK" | tee -a "$LINK_FILE"
     fi
 
     if [[ -n "$IPV6" ]]; then
         COUNTRY=$(detect_country "$IPV6")
-        LINK="tuic://$UUID:$ENC_PASS@[$IPV6]:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=bbr#TUIC-IPv6-${COUNTRY}"
+        LINK="tuic://$UUID:$ENC_PASS@[$IPV6]:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=$CONGESTION#TUIC-IPv6-${COUNTRY}"
         echo "$LINK" | tee -a "$LINK_FILE"
     fi
 
@@ -93,50 +110,7 @@ generate_links() {
     fi
 }
 
-
-export_clients() {
-    UUID=$(sed -n '1p' "$USER_FILE")
-    PASS=$(sed -n '2p' "$USER_FILE")
-    IP=$(curl -s ipv4.icanhazip.com || curl -s ipv6.icanhazip.com)
-    cat > "$WORK_DIR/v2rayn-tuic.json" <<EOF
-{
-  "protocol": "tuic",
-  "tag": "TUIC-bbr",
-  "settings": {
-    "server": "$IP",
-    "server_port": $PORT,
-    "uuid": "$UUID",
-    "password": "$PASS",
-    "congestion_control": "bbr",
-    "alpn": ["h3"],
-    "sni": "$MASQ_DOMAIN",
-    "udp_relay_mode": "native",
-    "disable_sni": false,
-    "reduce_rtt": true
-  }
-}
-EOF
-
-    cat > "$WORK_DIR/clash-tuic.yaml" <<EOF
-proxies:
-  - name: "TUIC-bbr"
-    type: tuic
-    server: $IP
-    port: $PORT
-    uuid: "$UUID"
-    password: "$PASS"
-    alpn: ["h3"]
-    sni: "$MASQ_DOMAIN"
-    congestion_control: bbr
-    udp_relay_mode: native
-    skip-cert-verify: true
-    disable_sni: false
-    reduce_rtt: true
-EOF
-}
-
 install_service() {
-    validate_config
     if pidof systemd >/dev/null; then
         cat > /etc/systemd/system/tuic.service <<EOF
 [Unit]
@@ -172,68 +146,10 @@ EOF
     fi
 }
 
-test_tuic_running() {
-    sleep 2
-    ss -tuln | grep ":$PORT" >/dev/null && echo "✅ TUIC 已成功监听端口 $PORT" || echo "⚠️ TUIC 未监听端口，请检查日志或配置"
-}
-
-modify_port() {
-    read -p "请输入新端口号: " NEW_PORT
-    PORT="$NEW_PORT"
-    generate_config
-    systemctl restart tuic 2>/dev/null || rc-service tuic restart 2>/dev/null || echo "请手动重启 TUIC"
-    echo "✅ 端口已修改为 $PORT"
-}
-
-uninstall_tuic() {
-    BACKUP_DIR="/etc/tuic-backup-$(date +%s)"
-    mkdir -p "$BACKUP_DIR"
-    cp -r "$WORK_DIR" "$BACKUP_DIR"
-    systemctl stop tuic 2>/dev/null || rc-service tuic stop 2>/dev/null || true
-    systemctl disable tuic 2>/dev/null || rc-update del tuic default 2>/dev/null || true
-    rm -rf "$WORK_DIR" /etc/systemd/system/tuic.service /etc/init.d/tuic
-    echo "✅ TUIC 已卸载，配置备份于 $BACKUP_DIR"
-}
-
-show_info() {
-    echo "📄 节点链接:"
-    cat "$LINK_FILE"
-    echo "📦 v2rayN 配置: $WORK_DIR/v2rayn-tuic.json"
-    echo "📦 Clash 配置: $WORK_DIR/clash-tuic.yaml"
-    echo "🔑 UUID: $(sed -n '1p' "$USER_FILE")"
-    echo "🔑 密码: $(sed -n '2p' "$USER_FILE")"
-    echo "📁 配置文件: $SERVER_JSON"
-}
-
-main_menu() {
-    echo "---------------------------------------"
-    echo " TUIC 一键部署脚本（TUIC 1.0.0 修复版）"
-    echo "---------------------------------------"
-    echo "请选择操作:"
-    echo "1) 安装 TUIC 服务"
-    echo "2) 修改端口"
-    echo "3) 查看节点信息"
-    echo "4) 卸载 TUIC"
-    echo "5) 退出"
-    read -p "请输入选项 [1-5]: " CHOICE
-
-    case "$CHOICE" in
-        1)
-            generate_certificate
-            download_tuic
-            generate_user
-            generate_config
-            generate_links
-            export_clients
-            install_service
-            test_tuic_running
-            ;;
-        2) modify_port ;;
-        3) show_info ;;
-        4) uninstall_tuic ;;
-        5) echo "👋 再见"; exit 0 ;;
-        *) echo "❌ 无效选项"; exit 1 ;;
-    esac
-}
-
-main_menu
+# 主流程
+generate_certificate
+download_tuic
+generate_user
+generate_config
+generate_links
+install_service

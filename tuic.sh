@@ -180,5 +180,3 @@ cat > $V2RAYN_FILE <<EOF
     "server": "${IPV4:-$IPV6}",
     "server_port": $PORT,
     "uuid": "$UUID",
-    "password": "$PASS",
-    "con

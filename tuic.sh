@@ -157,11 +157,51 @@ EOF
     cat "$LINK_FILE"
 }
 
-# 主流程
-generate_certificate
-download_tuic
-generate_user
-generate_config
-generate_links
-export_clients
-install_service
+modify_port() {
+    read -p "请输入新端口号: " NEW_PORT
+    PORT="$NEW_PORT"
+    generate_config
+    systemctl restart tuic 2>/dev/null || rc-service tuic restart 2>/dev/null || echo "请手动重启 TUIC"
+    echo "✅ 端口已修改为 $PORT"
+}
+
+uninstall_tuic() {
+    BACKUP_DIR="/etc/tuic-backup-$(date +%s)"
+    mkdir -p "$BACKUP_DIR"
+    cp -r "$WORK_DIR" "$BACKUP_DIR"
+    systemctl stop tuic 2>/dev/null || rc-service tuic stop 2>/dev/null || true
+    systemctl disable tuic 2>/dev/null || rc-update del tuic default 2>/dev/null || true
+    rm -rf "$WORK_DIR" /etc/systemd/system/tuic.service /etc/init.d/tuic
+    echo "✅ TUIC 已卸载，配置备份于 $BACKUP_DIR"
+}
+
+show_info() {
+    echo "📄 节点链接:"
+    cat "$LINK_FILE"
+    echo "📦 v2rayN 配置: $WORK_DIR/v2rayn-tuic.json"
+    echo "📦 Clash 配置: $WORK_DIR/clash-tuic.yaml"
+    echo "🔑 UUID: $(sed -n '1p' "$USER_FILE")"
+    echo "🔑 密码: $(sed -n '2p' "$USER_FILE")"
+    echo "📁 配置文件: $SERVER_JSON"
+}
+
+main_menu() {
+    echo "---------------------------------------"
+    echo " TUIC 一键部署脚本（完整增强版）"
+    echo "---------------------------------------"
+    echo "请选择操作:"
+    echo "1) 安装 TUIC 服务"
+    echo "2) 修改端口"
+    echo "3) 查看节点信息"
+    echo "4) 卸载 TUIC"
+    echo "5) 退出"
+    read -p "请输入选项 [1-5]: " CHOICE
+
+    case "$CHOICE" in
+        1)
+            generate_certificate
+            download_tuic
+            generate_user
+            generate_config
+            generate_links
+            export_clients

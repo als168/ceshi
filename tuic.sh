@@ -58,18 +58,12 @@ EOF
 }
 
 validate_config() {
-    if ! grep -q '
+    grep -q '
 
 \[users\]
 
-' "$SERVER_TOML"; then
-        echo "❌ 配置文件缺少 [users] 部分，请检查 server.toml"
-        exit 1
-    fi
-    if ! grep -q "$CERT_PEM" "$SERVER_TOML"; then
-        echo "❌ TLS 证书路径未正确写入配置"
-        exit 1
-    fi
+' "$SERVER_TOML" || { echo "❌ 配置文件缺少 [users] 部分"; exit 1; }
+    grep -q "$CERT_PEM" "$SERVER_TOML" || { echo "❌ TLS 证书路径未正确写入配置"; exit 1; }
 }
 
 generate_links() {
@@ -165,11 +159,7 @@ EOF
 
 test_tuic_running() {
     sleep 2
-    if ss -tuln | grep ":$PORT" >/dev/null; then
-        echo "✅ TUIC 已成功监听端口 $PORT"
-    else
-        echo "⚠️ TUIC 未监听端口，请检查日志或配置"
-    fi
+    ss -tuln | grep ":$PORT" >/dev/null && echo "✅ TUIC 已成功监听端口 $PORT" || echo "⚠️ TUIC 未监听端口，请检查日志或配置"
 }
 
 modify_port() {
@@ -229,3 +219,6 @@ main_menu() {
         5) echo "👋 再见"; exit 0 ;;
         *) echo "❌ 无效选项"; exit 1 ;;
     esac
+}
+
+main_menu

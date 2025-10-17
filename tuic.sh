@@ -1,12 +1,18 @@
 #!/bin/bash
 set -e
 
+# 确保脚本用 bash 执行
+if [ -z "$BASH_VERSION" ]; then
+  echo "❌ 请使用 bash 来运行此脚本，例如："
+  echo "   bash tuic.sh"
+  exit 1
+fi
+
 CERT_DIR="/etc/tuic"
 WORK_DIR="$CERT_DIR"
 CONFIG_FILE="$WORK_DIR/config.json"
 USER_FILE="$WORK_DIR/tuic_user.txt"
 LINK_FILE="$WORK_DIR/tuic-links.txt"
-SERVICE_FILE="/etc/init.d/tuic"
 
 MASQ_DOMAINS=("www.microsoft.com" "www.cloudflare.com" "www.bing.com" "www.apple.com" "www.amazon.com" "www.wikipedia.org")
 FAKE_DOMAIN=${MASQ_DOMAINS[$RANDOM % ${#MASQ_DOMAINS[@]}]}
@@ -29,12 +35,16 @@ if [ -x "$WORK_DIR/tuic-server" ]; then
       read -p "请输入新的端口号: " NEW_PORT
       [ -z "$NEW_PORT" ] && echo "❌ 端口不能为空" && exit 1
       sed -i "s/\"server\": \".*\"/\"server\": \"[::]:$NEW_PORT\"/" "$CONFIG_FILE"
-      echo "端口已修改为 $NEW_PORT"
+      systemctl restart tuic || true
+      echo "✅ 端口已修改为 $NEW_PORT"
       exit 0
       ;;
     2)
       echo "正在卸载 TUIC..."
-      rm -rf "$WORK_DIR"
+      systemctl stop tuic || true
+      systemctl disable tuic || true
+      rm -rf "$WORK_DIR" /etc/systemd/system/tuic.service
+      systemctl daemon-reload
       echo "✅ TUIC 已卸载完成"
       exit 0
       ;;
@@ -84,9 +94,26 @@ if [ ! -f "$CERT_PEM" ] || ! openssl x509 -checkend 0 -noout -in "$CERT_PEM" >/d
     -keyout "$KEY_PEM" -out "$CERT_PEM" -subj "/CN=$FAKE_DOMAIN" -days 365 -nodes >/dev/null 2>&1
 fi
 
+# ---------------- 拥塞控制算法检测 ----------------
+detect_cc_algo() {
+    if sysctl net.ipv4.tcp_available_congestion_control >/dev/null 2>&1; then
+        SUPPORTED=$(sysctl -n net.ipv4.tcp_available_congestion_control)
+    else
+        SUPPORTED="cubic reno"
+    fi
+
+    if echo "$SUPPORTED" | grep -qw "bbr2"; then
+        CC_ALGO="bbr2"
+    elif echo "$SUPPORTED" | grep -qw "bbr"; then
+        CC_ALGO="bbr"
+    else
+        CC_ALGO="cubic"
+    fi
+}
+detect_cc_algo
+
 # ---------------- 生成配置 ----------------
 PORT=28543
-CC_ALGO="bbr"
 cat > $CONFIG_FILE <<EOF
 {
   "server": "[::]:$PORT",
@@ -101,14 +128,28 @@ cat > $CONFIG_FILE <<EOF
 EOF
 
 # ---------------- 输出链接 ----------------
-IPV4=$(curl -s ipv4.icanhazip.com)
-COUNTRY=$(curl -s "http://ip-api.com/line/${IPV4}?fields=countryCode" || echo "XX")
+IPV4=$(curl -s ipv4.icanhazip.com || true)
+IPV6=$(curl -s ipv6.icanhazip.com || true)
+
 ENC_PASS=$(printf '%s' "$PASS" | jq -s -R -r @uri)
 ENC_SNI=$(printf '%s' "$FAKE_DOMAIN" | jq -s -R -r @uri)
 
-LINK="tuic://$UUID:$ENC_PASS@$IPV4:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=$CC_ALGO#TUIC-${COUNTRY}-IPv4-$CC_ALGO"
+> "$LINK_FILE"
 
-echo "$LINK" > "$LINK_FILE"
+if [ -n "$IPV6" ]; then
+  COUNTRY6=$(curl -s "http://ip-api.com/line/${IPV6}?fields=countryCode" || echo "XX")
+  LINK6="tuic://$UUID:$ENC_PASS@[$IPV6]:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=$CC_ALGO#TUIC-${COUNTRY6}-IPv6-$CC_ALGO"
+  echo "$LINK6" >> "$LINK_FILE"
+  echo "IPv6 节点: $LINK6"
+fi
+
+if [ -n "$IPV4" ]; then
+  COUNTRY4=$(curl -s "http://ip-api.com/line/${IPV4}?fields=countryCode" || echo "XX")
+  LINK4="tuic://$UUID:$ENC_PASS@$IPV4:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=$CC_ALGO#TUIC-${COUNTRY4}-IPv4-$CC_ALGO"
+  echo "$LINK4" >> "$LINK_FILE"
+  echo "IPv4 节点: $LINK4"
+fi
+
 ln -sf "$LINK_FILE" /root/tuic-links.txt
 
 # ---------------- v2rayN 配置 ----------------
@@ -117,7 +158,7 @@ cat > "$WORK_DIR/v2rayn-tuic.json" <<EOF
   "protocol": "tuic",
   "tag": "TUIC-$CC_ALGO",
   "settings": {
-    "server": "$IPV4",
+    "server": "${IPV6:-$IPV4}",
     "server_port": $PORT,
     "uuid": "$UUID",
     "password": "$PASS",
@@ -131,9 +172,9 @@ EOF
 # ---------------- Clash Meta 配置 ----------------
 cat > "$WORK_DIR/clash-tuic.yaml" <<EOF
 proxies:
-  - name: "TUIC-${COUNTRY}-${CC_ALGO}"
+  - name: "TUIC-${CC_ALGO}"
     type: tuic
-    server: $IPV4
+    server: ${IPV6:-$IPV4}
     port: $PORT
     uuid: "$UUID"
     password: "$PASS"
@@ -144,5 +185,8 @@ proxies:
     skip-cert-verify: true
 EOF
 
-echo "✅ 安装完成，节点信息已保存到: $LINK_FILE"
-echo "快捷访问: ~/tuic-links.txt"
+# ---------------- systemd 服务 ----------------
+cat > /etc/systemd/system/tuic.service <<EOF
+[Unit]
+Description=TUIC Server
+After=network

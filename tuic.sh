@@ -169,21 +169,233 @@ chmod +x $SERVICE_FILE
 rc-update add tuic default
 rc-service tuic restart
 
-# ===== 输出节点链接 =====
-ENC_PASS=$(printf '%s' "$PASS" | jq -s -R -r @uri) # URL 编码密码
-IP=$(wget -qO- ipv4.icanhazip.com || wget -qO- ipv6.icanhazip.com)
+# ===== 检测 IP 类型 =====
+detect_ip_type() {
+    local ipv4=""
+    local ipv6=""
+    
+    if [ -x "$(command -v wget)" ]; then
+        ipv4=$(wget -qO- ipv4.icanhazip.com 2>/dev/null)
+        ipv6=$(wget -qO- ipv6.icanhazip.com 2>/dev/null)
+    elif [ -x "$(command -v curl)" ]; then
+        ipv4=$(curl -s ipv4.icanhazip.com 2>/dev/null)
+        ipv6=$(curl -s ipv6.icanhazip.com 2>/dev/null)
+    fi
+    
+    echo "$ipv4" > $CERT_DIR/ipv4.txt
+    echo "$ipv6" > $CERT_DIR/ipv6.txt
+    
+    if [ -z "$ipv4" ] && [ -z "$ipv6" ]; then
+        echo "❌ 无法获取服务器 IP 地址"
+        exit 1
+    fi
+    
+    if [ -z "$ipv4" ]; then
+        IP_TYPE="IPv6"
+    elif [ -z "$ipv6" ]; then
+        IP_TYPE="IPv4"
+    else
+        IP_TYPE="IPv4 & IPv6"
+    fi
+}
 
-echo "------------------------------------------------------------------------"
-echo " TUIC 安装和配置完成！"
-echo "------------------------------------------------------------------------"
-echo "服务器地址: $IP"
-echo "端口: $PORT"
-echo "UUID: $UUID"
-echo "密码: $PASS"
-echo "SNI: $FAKE_DOMAIN"
-echo "证书路径: $CERT_PATH"
-echo "私钥路径: $KEY_PATH"
-echo "------------------------------------------------------------------------"
-echo "TUIC 订阅链接:"
-echo "tuic://$UUID:$ENC_PASS@$IP:$PORT?sni=$FAKE_DOMAIN&alpn=h3&congestion_control=bbr"
-echo "------------------------------------------------------------------------"
+detect_ip_type
+
+# ===== 生成订阅链接 =====
+generate_links() {
+    local enc_pass enc_sni ipv4 ipv6 country4 country6 link4 link6
+    
+    enc_pass=$(printf '%s' "$PASS" | jq -s -R -r @uri) # URL 编码密码
+    enc_sni=$(printf '%s' "$FAKE_DOMAIN" | jq -s -R -r @uri) # URL 编码 SNI
+    
+    ipv4=$(cat $CERT_DIR/ipv4.txt)
+    ipv6=$(cat $CERT_DIR/ipv6.txt)
+    
+    if [ -n "$ipv4" ]; then
+        country4=$(curl -s "http://ip-api.com/line/$ipv4?fields=countryCode" || echo "XX")
+        link4="tuic://$UUID:$enc_pass@$ipv4:$PORT?sni=$enc_sni&alpn=h3&congestion_control=bbr#TUIC-$country4"
+    fi
+    
+    if [ -n "$ipv6" ]; then
+        country6=$(curl -s "http://ip-api.com/line/$ipv6?fields=countryCode" || echo "XX")
+        link6="tuic://$UUID:$enc_pass@[$ipv6]:$PORT?sni=$enc_sni&alpn=h3&congestion_control=bbr#TUIC-$country6"
+    fi
+    
+    echo "------------------------------------------------------------------------"
+    echo " TUIC 安装和配置完成！"
+    echo "------------------------------------------------------------------------"
+    echo "服务器地址: $ipv4 $ipv6"
+    echo "端口: $PORT"
+    echo "UUID: $UUID"
+    echo "密码: $PASS"
+    echo "SNI: $FAKE_DOMAIN"
+    echo "证书路径: $CERT_PATH"
+    echo "私钥路径: $KEY_PATH"
+    echo "IP 类型: $IP_TYPE"
+    echo "------------------------------------------------------------------------"
+    echo "TUIC 订阅链接:"
+    [ -n "$link4" ] && echo "$link4"
+    [ -n "$link6" ] && echo "$link6"
+    echo "------------------------------------------------------------------------"
+}
+
+generate_links
+
+# ===== 显示节点信息 =====
+show_info() {
+    local ipv4 ipv6 country4 country6 link4 link6
+    
+    ipv4=$(cat $CERT_DIR/ipv4.txt)
+    ipv6=$(cat $CERT_DIR/ipv6.txt)
+    
+    if [ -n "$ipv4" ]; then
+        country4=$(curl -s "http://ip-api.com/line/$ipv4?fields=countryCode" || echo "XX")
+        link4="tuic://$UUID:$enc_pass@$ipv4:$PORT?sni=$enc_sni&alpn=h3&congestion_control=bbr#TUIC-$country4"
+    fi
+    
+    if [ -n "$ipv6" ]; then
+        country6=$(curl -s "http://ip-api.com/line/$ipv6?fields=countryCode" || echo "XX")
+        link6="tuic://$UUID:$enc_pass@[$ipv6]:$PORT?sni=$enc_sni&alpn=h3&congestion_control=bbr#TUIC-$country6"
+    fi
+    
+    echo "---------------------------------------"
+    echo "📄 节点链接:"
+    [ -n "$link4" ] && echo "$link4"
+    [ -n "$link6" ] && echo "$link6"
+    echo "🔑 UUID: $UUID"
+    echo "🔑 密码: $PASS"
+    echo "🎭 SNI: $FAKE_DOMAIN"
+    echo "🔌 端口: $PORT"
+    echo "📁 配置文件: $CONFIG_FILE"
+    echo "IP 类型: $IP_TYPE"
+    echo "---------------------------------------"
+}
+
+# ===== 修改端口 =====
+modify_port() {
+    local new_port
+    read -p "请输入新端口号（10000–50000）: " new_port
+    if [[ "$new_port" =~ ^[0-9]+$ ]] && (( new_port >= 10000 && new_port <= 50000 )); then
+        if is_port_available "$new_port"; then
+            echo "🎯 新端口已设置为：$new_port"
+            PORT="$new_port"
+            generate_config
+            generate_links
+            echo "✅ 配置已更新"
+            rc-service tuic restart || echo "⚠️ 请手动重启 TUIC"
+        else
+            echo "❌ 端口 $new_port 已被占用，请选择其他端口"
+        fi
+    else
+        echo "❌ 无效端口，请输入 10000–50000 范围内的数字"
+    fi
+}
+
+# ===== 生成配置文件 =====
+generate_config() {
+    local uuid pass enc_pass enc_sni
+    uuid="$UUID"
+    pass="$PASS"
+    enc_pass=$(printf '%s' "$pass" | jq -s -R -r @uri)
+    enc_sni=$(printf '%s' "$FAKE_DOMAIN" | jq -s -R -r @uri)
+    
+    cat > "$CONFIG_FILE" <<EOF
+{
+    "server": "[::]:$PORT",
+    "users": {
+        "$uuid": "$pass"
+    },
+    "certificate": "$CERT_PATH",
+    "private_key": "$KEY_PATH",
+    "alpn": ["h3"],
+    "congestion_control": "bbr"
+}
+EOF
+    echo "配置文件已生成: $CONFIG_FILE"
+}
+
+# ===== 卸载 TUIC =====
+uninstall_tuic() {
+    local backup_dir
+    backup_dir="/etc/tuic-backup-$(date +%s)"
+    mkdir -p "$backup_dir"
+    cp -r "$CERT_DIR" "$backup_dir" 2>/dev/null || true
+
+    rc-service tuic stop || true
+    rc-update del tuic default || true
+    rm -f /etc/init.d/tuic
+    rm -f "$TUIC_BIN"
+    rm -rf "$CERT_DIR"
+    echo "✅ TUIC 已卸载，配置备份于 $backup_dir"
+}
+
+# ===== 一键安装 TUIC =====
+do_install() {
+    generate_certificate
+    download_tuic
+    generate_user
+    generate_config
+    generate_links
+    install_service
+    show_info
+    copy_to_clipboard
+}
+
+# ===== 复制到剪贴板 =====
+copy_to_clipboard() {
+    local link4 link6
+    link4=$(head -n 1 $CERT_DIR/links.txt | grep -o '^[^#]*')
+    link6=$(tail -n 1 $CERT_DIR/links.txt | grep -o '^[^#]*')
+    
+    if command -v xclip >/dev/null 2>&1; then
+        if [ -n "$link4" ]; then
+            echo "$link4" | xclip -selection clipboard
+            echo "📋 IPv4 节点链接已复制到剪贴板 (xclip)"
+        elif [ -n "$link6" ]; then
+            echo "$link6" | xclip -selection clipboard
+            echo "📋 IPv6 节点链接已复制到剪贴板 (xclip)"
+        else
+            echo "❌ 未检测到有效的节点链接"
+        fi
+    elif command -v pbcopy >/dev/null 2>&1; then
+        if [ -n "$link4" ]; then
+            echo "$link4" | pbcopy
+            echo "📋 IPv4 节点链接已复制到剪贴板 (pbcopy)"
+        elif [ -n "$link6" ]; then
+            echo "$link6" | pbcopy
+            echo "📋 IPv6 节点链接已复制到剪贴板 (pbcopy)"
+        else
+            echo "❌ 未检测到有效的节点链接"
+        fi
+    else
+        echo "⚠️ 未检测到剪贴板工具 (xclip/pbcopy)，请手动复制以下链接:"
+        [ -n "$link4" ] && echo "$link4"
+        [ -n "$link6" ] && echo "$link6"
+    fi
+}
+
+# ===== 主菜单 =====
+main_menu() {
+    while true; do
+        echo "---------------------------------------"
+        echo " TUIC 一键部署脚本（终极增强版）"
+        echo "---------------------------------------"
+        echo "1) 安装 TUIC 服务"
+        echo "2) 查看节点信息"
+        echo "3) 修改端口"
+        echo "4) 卸载 TUIC"
+        echo "5) 退出"
+        read -p "请输入选项 [1-5]: " CHOICE
+
+        case "$CHOICE" in
+            1) do_install ;;
+            2) show_info ;;
+            3) modify_port ;;
+            4) uninstall_tuic ;;
+            5) echo "👋 再见"; exit 0 ;;
+            *) echo "❌ 无效选项";;
+        esac
+    done
+}
+
+main_menu

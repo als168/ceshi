@@ -20,10 +20,7 @@ if [ -x "$TUIC_BIN" ]; then
   case "$choice" in
     1)
       read -p "请输入新的端口号: " NEW_PORT
-      if [ -z "$NEW_PORT" ]; then
-        echo "❌ 端口不能为空"
-        exit 1
-      fi
+      [ -z "$NEW_PORT" ] && echo "❌ 端口不能为空" && exit 1
       sed -i "s/\"server\": \".*\"/\"server\": \"[::]:$NEW_PORT\"/" "$CONFIG_FILE"
       echo "端口已修改为 $NEW_PORT"
       rc-service tuic restart
@@ -39,18 +36,12 @@ if [ -x "$TUIC_BIN" ]; then
       echo "✅ TUIC 已卸载完成"
       exit 0
       ;;
-    3)
-      echo "已退出"
-      exit 0
-      ;;
-    *)
-      echo "无效选项"
-      exit 1
-      ;;
+    3) echo "已退出"; exit 0 ;;
+    *) echo "无效选项"; exit 1 ;;
   esac
 fi
 
-# ===== 如果未安装，执行安装流程 =====
+# ===== 安装流程 =====
 echo "---------------------------------------"
 echo " TUIC v5 Alpine Linux 安装脚本 "
 echo "---------------------------------------"
@@ -112,12 +103,10 @@ echo "请选择拥塞控制算法:"
 echo "1) bbr (推荐: 丢包多/跨境线路)"
 echo "2) cubic (推荐: 稳定小鸡/低丢包环境)"
 read -p "请输入选项 [1-2] (默认 1): " CC_CHOICE
-
 case "$CC_CHOICE" in
   2) CC_ALGO="cubic" ;;
   *) CC_ALGO="bbr" ;;
 esac
-
 echo "已选择拥塞算法: $CC_ALGO"
 
 cat > $CONFIG_FILE <<EOF
@@ -168,6 +157,10 @@ echo "拥塞算法: $CC_ALGO"
 [ -n "$IPV6" ] && echo "tuic://$UUID:$ENC_PASS@$IP6_URI:$PORT?sni=$ENC_SNI&alpn=h3#TUIC节点-IPv6"
 echo "------------------------------------------------------------------------"
 
+# ===== v2rayN 导入链接 =====
+echo "v2rayN 导入链接:"
+echo "tuic://$UUID:$ENC_PASS@${IPV4:-$IPV6}:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=$CC_ALGO#TUIC-$CC_ALGO"
+
 # ===== 生成 v2rayN 节点配置 =====
 V2RAYN_FILE="$CERT_DIR/v2rayn-tuic.json"
 cat > $V2RAYN_FILE <<EOF
@@ -201,10 +194,4 @@ proxies:
     uuid: "$UUID"
     password: "$PASS"
     alpn: ["h3"]
-    sni: "$FAKE_DOMAIN"
-    congestion_control: "$CC_ALGO"
-    udp_relay_mode: native
-    disable_sni: false
-    reduce_rtt: true
-EOF
-echo "Clash Meta 节点
+    sni

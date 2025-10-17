@@ -1,7 +1,5 @@
 #!/bin/bash
-# TUIC 一键部署脚本（最终优化版）
-# 支持 systemd / OpenRC / 前台运行，自动生成双栈节点、配置导出、服务管理
-
+# TUIC 一键部署脚本（旗舰增强版）
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -59,6 +57,21 @@ congestion_control = "bbr"
 EOF
 }
 
+validate_config() {
+    if ! grep -q '
+
+\[users\]
+
+' "$SERVER_TOML"; then
+        echo "❌ 配置文件缺少 [users] 部分，请检查 server.toml"
+        exit 1
+    fi
+    if ! grep -q "$CERT_PEM" "$SERVER_TOML"; then
+        echo "❌ TLS 证书路径未正确写入配置"
+        exit 1
+    fi
+}
+
 generate_links() {
     UUID=$(sed -n '1p' "$USER_FILE")
     PASS=$(sed -n '2p' "$USER_FILE")
@@ -94,6 +107,7 @@ export_clients() {
   }
 }
 EOF
+
     cat > "$WORK_DIR/clash-tuic.yaml" <<EOF
 proxies:
   - name: "TUIC-bbr"
@@ -113,6 +127,7 @@ EOF
 }
 
 install_service() {
+    validate_config
     if pidof systemd >/dev/null; then
         cat > /etc/systemd/system/tuic.service <<EOF
 [Unit]
@@ -148,6 +163,15 @@ EOF
     fi
 }
 
+test_tuic_running() {
+    sleep 2
+    if ss -tuln | grep ":$PORT" >/dev/null; then
+        echo "✅ TUIC 已成功监听端口 $PORT"
+    else
+        echo "⚠️ TUIC 未监听端口，请检查日志或配置"
+    fi
+}
+
 modify_port() {
     read -p "请输入新端口号: " NEW_PORT
     PORT="$NEW_PORT"
@@ -157,10 +181,13 @@ modify_port() {
 }
 
 uninstall_tuic() {
+    BACKUP_DIR="/etc/tuic-backup-$(date +%s)"
+    mkdir -p "$BACKUP_DIR"
+    cp -r "$WORK_DIR" "$BACKUP_DIR"
     systemctl stop tuic 2>/dev/null || rc-service tuic stop 2>/dev/null || true
     systemctl disable tuic 2>/dev/null || rc-update del tuic default 2>/dev/null || true
     rm -rf "$WORK_DIR" /etc/systemd/system/tuic.service /etc/init.d/tuic
-    echo "✅ TUIC 已卸载"
+    echo "✅ TUIC 已卸载，配置备份于 $BACKUP_DIR"
 }
 
 show_info() {
@@ -175,7 +202,7 @@ show_info() {
 
 main_menu() {
     echo "---------------------------------------"
-    echo " TUIC 一键部署脚本（最终修复版）"
+    echo " TUIC 一键部署脚本（旗舰增强版）"
     echo "---------------------------------------"
     echo "请选择操作:"
     echo "1) 安装 TUIC 服务"
@@ -194,6 +221,7 @@ main_menu() {
             generate_links
             export_clients
             install_service
+            test_tuic_running
             ;;
         2) modify_port ;;
         3) show_info ;;
@@ -201,6 +229,3 @@ main_menu() {
         5) echo "👋 再见"; exit 0 ;;
         *) echo "❌ 无效选项"; exit 1 ;;
     esac
-}
-
-main_menu

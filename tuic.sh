@@ -12,7 +12,20 @@ CERT_PEM="$WORK_DIR/tuic-cert.pem"
 KEY_PEM="$WORK_DIR/tuic-key.pem"
 USER_FILE="$WORK_DIR/tuic_user.txt"
 LINK_FILE="$WORK_DIR/tuic-link.txt"
-PORT="28888"
+
+find_free_port() {
+    for ((port=10000; port<=50000; port++)); do
+        if ! ss -ulpn 2>/dev/null | grep -q ":$port"; then
+            echo "$port"
+            return
+        fi
+    done
+    echo "❌ 未找到可用端口" >&2
+    exit 1
+}
+
+PORT=$(find_free_port)
+echo "🎯 已自动分配端口：$PORT"
 
 generate_certificate() {
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
@@ -112,11 +125,6 @@ EOF
 }
 
 install_service() {
-    if ss -ulpn | grep -q ":$PORT"; then
-        echo "⚠️ 端口 $PORT 已被占用，请修改端口或停止冲突进程"
-        exit 1
-    fi
-
     if pidof systemd >/dev/null; then
         cat > /etc/systemd/system/tuic.service <<EOF
 [Unit]
@@ -155,14 +163,6 @@ EOF
     cat "$LINK_FILE"
 }
 
-modify_port() {
-    read -p "请输入新端口号: " NEW_PORT
-    PORT="$NEW_PORT"
-    generate_config
-    systemctl restart tuic 2>/dev/null || rc-service tuic restart 2>/dev/null || echo "请手动重启 TUIC"
-    echo "✅ 端口已修改为 $PORT"
-}
-
 uninstall_tuic() {
     BACKUP_DIR="/etc/tuic-backup-$(date +%s)"
     mkdir -p "$BACKUP_DIR"
@@ -185,15 +185,14 @@ show_info() {
 
 main_menu() {
     echo "---------------------------------------"
-    echo " TUIC 一键部署脚本（固定 Bing 伪装域名）"
+    echo " TUIC 一键部署脚本（自动端口 + Bing 伪装）"
     echo "---------------------------------------"
     echo "请选择操作:"
     echo "1) 安装 TUIC 服务"
-    echo "2) 修改端口"
-    echo "3) 查看节点信息"
-    echo "4) 卸载 TUIC"
-    echo "5) 退出"
-    read -p "请输入选项 [1-5]: " CHOICE
+    echo "2) 查看节点信息"
+    echo "3) 卸载 TUIC"
+    echo "4) 退出"
+    read -p "请输入选项 [1-4]: " CHOICE
 
     case "$CHOICE" in
         1)
@@ -205,10 +204,9 @@ main_menu() {
             export_clients
             install_service
             ;;
-        2) modify_port ;;
-        3) show_info ;;
-        4) uninstall_tuic ;;
-        5) echo "👋 再见"; exit 0 ;;
+        2) show_info ;;
+        3) uninstall_tuic ;;
+        4) echo "👋 再见"; exit 0 ;;
         *) echo "❌ 无效选项"; exit 1 ;;
     esac
 }

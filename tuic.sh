@@ -27,13 +27,7 @@ MASQ_DOMAINS=(
 
 read -p "请输入监听端口（默认 28888）: " INPUT_PORT
 PORT="${INPUT_PORT:-28888}"
-
-echo "请选择拥塞控制算法："
-select ALGO in "bbr" "bbr2" "cubic"; do
-    CONGESTION="$ALGO"
-    break
-done
-
+CONGESTION="bbr"
 MASQ_DOMAIN=${MASQ_DOMAINS[$RANDOM % ${#MASQ_DOMAINS[@]}]}
 echo "🎭 已随机选择伪装域名：$MASQ_DOMAIN"
 

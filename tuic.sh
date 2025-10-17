@@ -5,8 +5,7 @@ IFS=$'\n\t'
 WORK_DIR="/etc/tuic"
 mkdir -p "$WORK_DIR"
 
-MASQ_DOMAINS=("www.microsoft.com" "www.cloudflare.com" "www.bing.com" "www.apple.com" "www.amazon.com")
-MASQ_DOMAIN=${MASQ_DOMAINS[$RANDOM % ${#MASQ_DOMAINS[@]}]}
+MASQ_DOMAIN="www.bing.com"
 TUIC_BIN="$WORK_DIR/tuic-server"
 SERVER_JSON="$WORK_DIR/server.json"
 CERT_PEM="$WORK_DIR/tuic-cert.pem"
@@ -65,7 +64,6 @@ generate_links() {
     for ip in $(curl -s ipv4.icanhazip.com; curl -s ipv6.icanhazip.com); do
         [[ "$ip" =~ ":" ]] && ip="[$ip]"
         COUNTRY=$(curl -s "http://ip-api.com/line/$ip?fields=countryCode" || echo "XX")
-        [[ "$COUNTRY" == "XX" ]] && echo "⚠️ 无法识别 IP 所属国家，已使用默认标识"
         LINK="tuic://$UUID:$ENC_PASS@$ip:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=bbr#TUIC-${COUNTRY}"
         echo "$LINK" | tee -a "$LINK_FILE"
     done
@@ -187,7 +185,7 @@ show_info() {
 
 main_menu() {
     echo "---------------------------------------"
-    echo " TUIC 一键部署脚本（完整增强版）"
+    echo " TUIC 一键部署脚本（固定 Bing 伪装域名）"
     echo "---------------------------------------"
     echo "请选择操作:"
     echo "1) 安装 TUIC 服务"
@@ -205,3 +203,14 @@ main_menu() {
             generate_config
             generate_links
             export_clients
+            install_service
+            ;;
+        2) modify_port ;;
+        3) show_info ;;
+        4) uninstall_tuic ;;
+        5) echo "👋 再见"; exit 0 ;;
+        *) echo "❌ 无效选项"; exit 1 ;;
+    esac
+}
+
+main_menu

@@ -102,6 +102,8 @@ fi
 # ===== 生成配置 =====
 UUID=$(cat /proc/sys/kernel/random/uuid)
 PASS=$(openssl rand -base64 16)
+[ -z "$FAKE_DOMAIN" ] && FAKE_DOMAIN="www.bing.com"
+
 read -p "请输入 TUIC 端口 (默认 28543): " PORT
 [ -z "$PORT" ] && PORT=28543
 
@@ -138,10 +140,16 @@ IPV4=$(wget -qO- -T 5 ipv4.icanhazip.com)
 IPV6=$(wget -qO- -T 5 ipv6.icanhazip.com)
 [ -n "$IPV6" ] && IP6_URI="[$IPV6]"
 
+# ===== URI 编码 =====
 ENC_PASS=$(printf '%s' "$PASS" | jq -s -R -r @uri)
 ENC_SNI=$(printf '%s' "$FAKE_DOMAIN" | jq -s -R -r @uri)
 
+# ===== 输出订阅链接 =====
 echo "------------------------------------------------------------------------"
+echo "UUID: $UUID"
+echo "密码: $PASS"
+echo "SNI: $FAKE_DOMAIN"
+echo "端口: $PORT"
 [ -n "$IPV4" ] && echo "tuic://$UUID:$ENC_PASS@$IPV4:$PORT?sni=$ENC_SNI&alpn=h3#TUIC节点-IPv4"
 [ -n "$IPV6" ] && echo "tuic://$UUID:$ENC_PASS@$IP6_URI:$PORT?sni=$ENC_SNI&alpn=h3#TUIC节点-IPv6"
 echo "------------------------------------------------------------------------"

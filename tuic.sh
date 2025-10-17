@@ -107,6 +107,19 @@ PASS=$(openssl rand -base64 16)
 read -p "请输入 TUIC 端口 (默认 28543): " PORT
 [ -z "$PORT" ] && PORT=28543
 
+# ===== 拥塞算法选择 =====
+echo "请选择拥塞控制算法:"
+echo "1) bbr (推荐: 丢包多/跨境线路)"
+echo "2) cubic (推荐: 稳定小鸡/低丢包环境)"
+read -p "请输入选项 [1-2] (默认 1): " CC_CHOICE
+
+case "$CC_CHOICE" in
+  2) CC_ALGO="cubic" ;;
+  *) CC_ALGO="bbr" ;;
+esac
+
+echo "已选择拥塞算法: $CC_ALGO"
+
 cat > $CONFIG_FILE <<EOF
 {
   "server": "[::]:$PORT",
@@ -116,7 +129,7 @@ cat > $CONFIG_FILE <<EOF
   "certificate": "$CERT_PATH",
   "private_key": "$KEY_PATH",
   "alpn": ["h3"],
-  "congestion_control": "bbr"
+  "congestion_control": "$CC_ALGO"
 }
 EOF
 
@@ -150,6 +163,48 @@ echo "UUID: $UUID"
 echo "密码: $PASS"
 echo "SNI: $FAKE_DOMAIN"
 echo "端口: $PORT"
+echo "拥塞算法: $CC_ALGO"
 [ -n "$IPV4" ] && echo "tuic://$UUID:$ENC_PASS@$IPV4:$PORT?sni=$ENC_SNI&alpn=h3#TUIC节点-IPv4"
 [ -n "$IPV6" ] && echo "tuic://$UUID:$ENC_PASS@$IP6_URI:$PORT?sni=$ENC_SNI&alpn=h3#TUIC节点-IPv6"
 echo "------------------------------------------------------------------------"
+
+# ===== 生成 v2rayN 节点配置 =====
+V2RAYN_FILE="$CERT_DIR/v2rayn-tuic.json"
+cat > $V2RAYN_FILE <<EOF
+{
+  "protocol": "tuic",
+  "tag": "TUIC-$CC_ALGO",
+  "settings": {
+    "server": "${IPV4:-$IPV6}",
+    "server_port": $PORT,
+    "uuid": "$UUID",
+    "password": "$PASS",
+    "congestion_control": "$CC_ALGO",
+    "alpn": ["h3"],
+    "sni": "$FAKE_DOMAIN",
+    "udp_relay_mode": "native",
+    "disable_sni": false,
+    "reduce_rtt": true
+  }
+}
+EOF
+echo "v2rayN 节点配置文件已生成: $V2RAYN_FILE"
+
+# ===== 生成 Clash Meta 节点配置 =====
+CLASH_FILE="$CERT_DIR/clash-tuic.yaml"
+cat > $CLASH_FILE <<EOF
+proxies:
+  - name: "TUIC-$CC_ALGO"
+    type: tuic
+    server: ${IPV4:-$IPV6}
+    port: $PORT
+    uuid: "$UUID"
+    password: "$PASS"
+    alpn: ["h3"]
+    sni: "$FAKE_DOMAIN"
+    congestion_control: "$CC_ALGO"
+    udp_relay_mode: native
+    disable_sni: false
+    reduce_rtt: true
+EOF
+echo "Clash Meta 节点

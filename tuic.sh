@@ -43,17 +43,24 @@ install_deps() {
     fi
 }
 install_deps
-
 # -------------------------------
 # 端口检测与分配
 # -------------------------------
 is_port_in_use() {
     local port="$1"
     if command -v ss >/dev/null 2>&1; then
-        ss -tuln 2>/dev/null | awk '{print $5}' | grep -qE "[:\\[]${port}\\]?$"
+        ss -tuln 2>/dev/null | awk '{print $5}' | grep -qE "[:\
+
+\[]${port}\\]
+
+?$"
         return $?
     elif command -v netstat >/dev/null 2>&1; then
-        netstat -tuln 2>/dev/null | awk '{print $4}' | grep -qE "[:\\[]${port}\\]?$"
+        netstat -tuln 2>/dev/null | awk '{print $4}' | grep -qE "[:\
+
+\[]${port}\\]
+
+?$"
         return $?
     elif command -v lsof >/dev/null 2>&1; then
         lsof -i :"$port" -sTCP:LISTEN -n 2>/dev/null | grep -q ":$port"
@@ -76,7 +83,6 @@ find_free_port() {
 
 PORT="$(find_free_port)"
 echo "🎯 已自动分配端口：$PORT"
-
 # -------------------------------
 # 核心功能函数
 # -------------------------------
@@ -120,7 +126,6 @@ generate_config() {
 }
 EOF
 }
-
 generate_links() {
     local uuid pass enc_pass enc_sni ip country link
     uuid="$(sed -n '1p' "$USER_FILE")"
@@ -163,7 +168,6 @@ export_clients() {
 }
 EOF
 }
-
 install_service() {
     if command -v openrc-run >/dev/null 2>&1; then
         cat > /etc/init.d/tuic <<'EOF'
@@ -198,42 +202,112 @@ EOF
         echo "🚀 未检测到 OpenRC 或 systemd，前台运行 TUIC..."
         exec "$TUIC_BIN" -c "$SERVER_JSON"
     fi
-    echo "✅ TUIC 服务已启动，以下是你的节点链接："
-    cat "$LINK_FILE"
+    echo "✅ TUIC 服务已启动"
 }
 
 modify_port() {
     local new_port
-    while true; do
-        read -p "请输入新端口号（10000–50000）: " new_port
-        if [[ ! "$new_port" =~ ^[0-9]+$ ]] || ((new_port < 10000 || new_port > 50000)); then
-            echo "❌ 端口号必须是10000到50000之间的数字，请重新输入。"
-            continue
-        fi
+    read -p "请输入新端口号（10000–50000）: " new_port
+    if [[ "$new_port" =~ ^[0-9]+$ ]] && (( new_port >= 10000 && new_port <= 50000 )); then
         if is_port_in_use "$new_port"; then
-            echo "❌ 端口 $new_port 已被占用，请选择其他端口。"
-            continue
+            echo "❌ 端口 $new_port 已被占用，请选择其他端口"
+            return
         fi
-        break
-    done
-
-    # 更新配置文件中的端口
-    jq ".server = "0.0.0.0:$new_port"" "$SERVER_JSON" > "$SERVER_JSON.tmp" && mv "$SERVER_JSON.tmp" "$SERVER_JSON"
-
-    # 更新端口变量
-    PORT="$new_port"
-
-    # 重新生成链接
-    generate_links
-
-    # 重启服务
-    if command -v systemctl >/dev/null 2>&1; then
-        systemctl restart tuic
-    elif command -v rc-service >/dev/null 2>&1; then
-        rc-service tuic restart
+        PORT="$new_port"
+        echo "🎯 新端口已设置为：$PORT"
+        generate_config
+        generate_links
+        export_clients
+        if command -v rc-service >/dev/null 2>&1; then
+            rc-service tuic restart || echo "⚠️ 请手动重启 TUIC"
+        elif command -v systemctl >/dev/null 2>&1; then
+            systemctl restart tuic || echo "⚠️ 请手动重启 TUIC"
+        fi
+        echo "✅ 配置已更新，服务已重启"
     else
-        echo "⚠️ 无法自动重启服务，请手动重启。"
+        echo "❌ 无效端口，请输入 10000–50000 范围内的数字"
+    fi
+}
+
+uninstall_tuic() {
+    local backup_dir
+    backup_dir="/etc/tuic-backup-$(date +%s)"
+    mkdir -p "$backup_dir"
+    cp -r "$WORK_DIR" "$backup_dir" 2>/dev/null || true
+
+    if command -v rc-service >/dev/null 2>&1; then
+        rc-service tuic stop || true
+        rc-update del tuic default || true
+        rm -f /etc/init.d/tuic
+    elif command -v systemctl >/dev/null 2>&1; then
+        systemctl stop tuic || true
+        systemctl disable tuic || true
+        rm -f /etc/systemd/system/tuic.service
+        systemctl daemon-reload || true
     fi
 
-    echo "✅ 端口修改成功，新端口：$PORT"
+    rm -rf "$WORK_DIR"
+    echo "✅ TUIC 已卸载，配置备份于 $backup_dir"
 }
+
+show_info() {
+    echo "---------------------------------------"
+    echo "📄 节点链接:"
+    [ -f "$LINK_FILE" ] && cat "$LINK_FILE" || echo "尚未生成链接"
+    echo "📦 v2rayN 配置: $WORK_DIR/v2rayn-tuic.json"
+    echo "📦 Clash 配置: $WORK_DIR/clash-tuic.yaml"
+    echo "🔑 UUID: $(sed -n '1p' "$USER_FILE" 2>/dev/null || echo N/A)"
+    echo "🔑 密码: $(sed -n '2p' "$USER_FILE" 2>/dev/null || echo N/A)"
+    echo "🎭 SNI: $MASQ_DOMAIN"
+    echo "🔌 端口: $PORT"
+    echo "📁 配置文件: $SERVER_JSON"
+    echo "---------------------------------------"
+}
+copy_to_clipboard() {
+    if command -v xclip >/dev/null 2>&1; then
+        head -n 1 "$LINK_FILE" | xclip -selection clipboard
+        echo "📋 节点链接已复制到剪贴板 (xclip)"
+    elif command -v pbcopy >/dev/null 2>&1; then
+        head -n 1 "$LINK_FILE" | pbcopy
+        echo "📋 节点链接已复制到剪贴板 (pbcopy)"
+    else
+        echo "⚠️ 未检测到剪贴板工具 (xclip/pbcopy)，请手动复制 $LINK_FILE 中的链接"
+    fi
+}
+
+do_install() {
+    generate_certificate
+    download_tuic
+    generate_user
+    generate_config
+    generate_links
+    export_clients
+    install_service
+    show_info
+    copy_to_clipboard
+}
+
+main_menu() {
+    while true; do
+        echo "---------------------------------------"
+        echo " TUIC 一键部署脚本（终极增强版）"
+        echo "---------------------------------------"
+        echo "1) 安装 TUIC 服务"
+        echo "2) 查看节点信息"
+        echo "3) 修改端口"
+        echo "4) 卸载 TUIC"
+        echo "5) 退出"
+        read -p "请输入选项 [1-5]: " CHOICE
+
+        case "$CHOICE" in
+            1) do_install ;;
+            2) show_info ;;
+            3) modify_port ;;
+            4) uninstall_tuic ;;
+            5) echo "👋 再见"; exit 0 ;;
+            *) echo "❌ 无效选项";;
+        esac
+    done
+}
+
+main_menu

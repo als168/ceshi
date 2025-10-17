@@ -163,6 +163,25 @@ EOF
     cat "$LINK_FILE"
 }
 
+modify_port() {
+    read -p "请输入新端口号（10000–50000）: " NEW_PORT
+    if [[ "$NEW_PORT" =~ ^[0-9]+$ ]] && (( NEW_PORT >= 10000 && NEW_PORT <= 50000 )); then
+        if ss -ulpn 2>/dev/null | grep -q ":$NEW_PORT"; then
+            echo "❌ 端口 $NEW_PORT 已被占用，请选择其他端口"
+            return
+        fi
+        PORT="$NEW_PORT"
+        echo "🎯 新端口已设置为：$PORT"
+        generate_config
+        generate_links
+        export_clients
+        systemctl restart tuic 2>/dev/null || rc-service tuic restart 2>/dev/null || echo "⚠️ 请手动重启 TUIC"
+        echo "✅ 配置已更新，服务已重启"
+    else
+        echo "❌ 无效端口，请输入 10000–50000 范围内的数字"
+    fi
+}
+
 uninstall_tuic() {
     BACKUP_DIR="/etc/tuic-backup-$(date +%s)"
     mkdir -p "$BACKUP_DIR"
@@ -185,30 +204,9 @@ show_info() {
 
 main_menu() {
     echo "---------------------------------------"
-    echo " TUIC 一键部署脚本（自动端口 + Bing 伪装）"
+    echo " TUIC 一键部署脚本（终极增强版）"
     echo "---------------------------------------"
     echo "请选择操作:"
     echo "1) 安装 TUIC 服务"
     echo "2) 查看节点信息"
-    echo "3) 卸载 TUIC"
-    echo "4) 退出"
-    read -p "请输入选项 [1-4]: " CHOICE
-
-    case "$CHOICE" in
-        1)
-            generate_certificate
-            download_tuic
-            generate_user
-            generate_config
-            generate_links
-            export_clients
-            install_service
-            ;;
-        2) show_info ;;
-        3) uninstall_tuic ;;
-        4) echo "👋 再见"; exit 0 ;;
-        *) echo "❌ 无效选项"; exit 1 ;;
-    esac
-}
-
-main_menu
+    echo "3

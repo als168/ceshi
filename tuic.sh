@@ -169,7 +169,7 @@ chmod +x $SERVICE_FILE
 rc-update add tuic default
 rc-service tuic restart
 
-# ===== 输出订阅链接 =====
+# ===== 输出节点链接 =====
 ENC_PASS=$(printf '%s' "$PASS" | jq -s -R -r @uri) # URL 编码密码
 IP=$(wget -qO- ipv4.icanhazip.com || wget -qO- ipv6.icanhazip.com)
 

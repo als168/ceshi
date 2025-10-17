@@ -1,6 +1,6 @@
 #!/bin/bash
-# TUIC 一键部署脚本（融合增强版）
-# 支持：自动安装、配置导出、节点生成、服务管理（systemd/OpenRC/前台）
+# TUIC 一键部署脚本（最终优化版）
+# 支持 systemd / OpenRC / 前台运行，自动生成双栈节点、配置导出、服务管理
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -16,10 +16,8 @@ CERT_PEM="$WORK_DIR/tuic-cert.pem"
 KEY_PEM="$WORK_DIR/tuic-key.pem"
 USER_FILE="$WORK_DIR/tuic_user.txt"
 LINK_FILE="$WORK_DIR/tuic-link.txt"
-PID_FILE="$WORK_DIR/tuic.pid"
 PORT="28888"
 
-# --------------------- 核心函数 ---------------------
 generate_certificate() {
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
         -keyout "$KEY_PEM" -out "$CERT_PEM" -subj "/CN=$MASQ_DOMAIN" -days 825 -nodes >/dev/null 2>&1
@@ -58,19 +56,62 @@ congestion_control = "bbr"
 EOF
 }
 
-generate_link() {
+generate_links() {
     UUID=$(sed -n '1p' "$USER_FILE")
     PASS=$(sed -n '2p' "$USER_FILE")
-    IP=$(curl -s https://api.ipify.org)
-    COUNTRY=$(curl -s "http://ip-api.com/line/$IP?fields=countryCode" || echo "XX")
     ENC_PASS=$(printf '%s' "$PASS" | jq -s -R -r @uri)
     ENC_SNI=$(printf '%s' "$MASQ_DOMAIN" | jq -s -R -r @uri)
-    LINK="tuic://$UUID:$ENC_PASS@$IP:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=bbr#TUIC-${COUNTRY}"
-    echo "$LINK" > "$LINK_FILE"
+    > "$LINK_FILE"
+    for ip in $(curl -s ipv4.icanhazip.com; curl -s ipv6.icanhazip.com); do
+        COUNTRY=$(curl -s "http://ip-api.com/line/$ip?fields=countryCode" || echo "XX")
+        LINK="tuic://$UUID:$ENC_PASS@$ip:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=bbr#TUIC-${COUNTRY}"
+        echo "$LINK" >> "$LINK_FILE"
+    done
 }
 
-install_service_systemd() {
-    cat > /etc/systemd/system/tuic.service <<EOF
+export_clients() {
+    UUID=$(sed -n '1p' "$USER_FILE")
+    PASS=$(sed -n '2p' "$USER_FILE")
+    IP=$(curl -s ipv4.icanhazip.com || curl -s ipv6.icanhazip.com)
+    cat > "$WORK_DIR/v2rayn-tuic.json" <<EOF
+{
+  "protocol": "tuic",
+  "tag": "TUIC-bbr",
+  "settings": {
+    "server": "$IP",
+    "server_port": $PORT,
+    "uuid": "$UUID",
+    "password": "$PASS",
+    "congestion_control": "bbr",
+    "alpn": ["h3"],
+    "sni": "$MASQ_DOMAIN",
+    "udp_relay_mode": "native",
+    "disable_sni": false,
+    "reduce_rtt": true
+  }
+}
+EOF
+    cat > "$WORK_DIR/clash-tuic.yaml" <<EOF
+proxies:
+  - name: "TUIC-bbr"
+    type: tuic
+    server: $IP
+    port: $PORT
+    uuid: "$UUID"
+    password: "$PASS"
+    alpn: ["h3"]
+    sni: "$MASQ_DOMAIN"
+    congestion_control: bbr
+    udp_relay_mode: native
+    skip-cert-verify: true
+    disable_sni: false
+    reduce_rtt: true
+EOF
+}
+
+install_service() {
+    if pidof systemd >/dev/null; then
+        cat > /etc/systemd/system/tuic.service <<EOF
 [Unit]
 Description=TUIC Server
 After=network.target
@@ -83,28 +124,25 @@ User=root
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reexec
-    systemctl daemon-reload
-    systemctl enable tuic
-    systemctl start tuic
-}
-
-install_service_openrc() {
-    cat > /etc/init.d/tuic <<EOF
+        systemctl daemon-reexec
+        systemctl daemon-reload
+        systemctl enable tuic
+        systemctl start tuic
+    elif command -v openrc-run >/dev/null; then
+        cat > /etc/init.d/tuic <<EOF
 #!/sbin/openrc-run
 command="$TUIC_BIN"
 command_args="-c $SERVER_TOML"
 pidfile="/run/tuic.pid"
 depend() { need net; }
 EOF
-    chmod +x /etc/init.d/tuic
-    rc-update add tuic default
-    rc-service tuic start
-}
-
-run_foreground() {
-    echo "🚀 TUIC 正在前台运行..."
-    exec "$TUIC_BIN" -c "$SERVER_TOML"
+        chmod +x /etc/init.d/tuic
+        rc-update add tuic default
+        rc-service tuic start
+    else
+        echo "🚀 TUIC 正在前台运行..."
+        exec "$TUIC_BIN" -c "$SERVER_TOML"
+    fi
 }
 
 modify_port() {
@@ -125,15 +163,16 @@ uninstall_tuic() {
 show_info() {
     echo "📄 节点链接:"
     cat "$LINK_FILE"
-    echo "📁 配置路径: $SERVER_TOML"
+    echo "📦 v2rayN 配置: $WORK_DIR/v2rayn-tuic.json"
+    echo "📦 Clash 配置: $WORK_DIR/clash-tuic.yaml"
     echo "🔑 UUID: $(sed -n '1p' "$USER_FILE")"
     echo "🔑 密码: $(sed -n '2p' "$USER_FILE")"
+    echo "📁 配置文件: $SERVER_TOML"
 }
 
-# --------------------- 主菜单 ---------------------
 main_menu() {
     echo "---------------------------------------"
-    echo " TUIC 一键部署脚本（融合增强版）"
+    echo " TUIC 一键部署脚本（最终优化版）"
     echo "---------------------------------------"
     echo "请选择操作:"
     echo "1) 安装 TUIC 服务"
@@ -149,18 +188,9 @@ main_menu() {
             download_tuic
             generate_user
             generate_config
-            generate_link
-            echo "请选择运行方式:"
-            echo "1) systemd 后台服务"
-            echo "2) OpenRC 后台服务"
-            echo "3) 前台运行（适合 Pterodactyl）"
-            read -p "请输入选项 [1-3]: " MODE
-            case "$MODE" in
-                1) install_service_systemd ;;
-                2) install_service_openrc ;;
-                3) run_foreground ;;
-                *) echo "❌ 无效选项"; exit 1 ;;
-            esac
+            generate_links
+            export_clients
+            install_service
             ;;
         2) modify_port ;;
         3) show_info ;;

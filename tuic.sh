@@ -39,9 +39,21 @@ generate_user() {
 generate_config() {
     UUID=$(sed -n '1p' "$USER_FILE")
     PASS=$(sed -n '2p' "$USER_FILE")
-    printf 'log_level = "off"\nserver = "0.0.0.0:%s"\n\n[users]\n"%s" = "%s"\n\n[tls]\ncertificate = "%s"\nprivate_key = "%s"\nalpn = ["h3"]\n\n[quic]\ncongestion_control = "bbr"\n' \
-        "$PORT" "$UUID" "$PASS" "$CERT_PEM" "$KEY_PEM" > "$SERVER_TOML"
+    cat > "$WORK_DIR/server.json" <<EOF
+{
+  "server": "0.0.0.0:$PORT",
+  "users": {
+    "$UUID": "$PASS"
+  },
+  "certificate": "$CERT_PEM",
+  "private_key": "$KEY_PEM",
+  "congestion_control": "bbr",
+  "alpn": ["h3"],
+  "log_level": "info"
 }
+EOF
+}
+
 
 
 validate_config() {

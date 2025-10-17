@@ -1,331 +1,189 @@
-#!/bin/bash
-set -euo pipefail
-IFS=$'\n\t'
+#!/bin/sh
+# TUIC v5 一键安装脚本 (Alpine Linux, 自动检测二进制 + URL 编码订阅链接)
+# 修改版：改进了二进制文件验证逻辑，增加了更多下载源，增加了自动端口检测功能
+set -e
 
-WORK_DIR="/etc/tuic"
-mkdir -p "$WORK_DIR"
+echo "---------------------------------------"
+echo " TUIC v5 Alpine Linux 安装脚本 (修改版)"
+echo "---------------------------------------"
 
-MASQ_DOMAIN="www.bing.com"
-TUIC_BIN="$WORK_DIR/tuic-server"
-SERVER_JSON="$WORK_DIR/server.json"
-CERT_PEM="$WORK_DIR/tuic-cert.pem"
-KEY_PEM="$WORK_DIR/tuic-key.pem"
-USER_FILE="$WORK_DIR/tuic_user.txt"
-LINK_FILE="$WORK_DIR/tuic-link.txt"
+# ===== 安装依赖 =====
+echo "正在安装必要的软件包..."
+apk add --no-cache wget curl openssl openrc lsof coreutils jq file >/dev/null
 
-# -------------------------------
-# 依赖检测与安装
-# -------------------------------
-install_deps() {
-    local deps=("curl" "jq" "openssl" "lsof" "netstat" "ss")
-    local missing=()
-    for dep in "${deps[@]}"; do
-        if ! command -v "$dep" >/dev/null 2>&1; then
-            missing+=("$dep")
+TUIC_BIN="/usr/local/bin/tuic"
+TEMP_BIN="/tmp/tuic_temp"
+
+# ===== 检测是否已有 TUIC =====
+if [ -x "$TUIC_BIN" ]; then
+    echo "检测到已存在 TUIC 二进制，跳过下载步骤"
+else
+    echo "未检测到 TUIC，开始下载..."
+    # 获取最新 tag
+    echo "正在获取最新版本信息..."
+    TAG=$(curl -s https://api.github.com/repos/tuic-protocol/tuic/releases/latest | jq -r .tag_name)
+    if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+        echo "无法获取最新版本信息，使用默认版本 1.0.0"
+        TAG="tuic-server-1.0.0"
+        VERSION="1.0.0"
+    else
+        VERSION=${TAG#tuic-server-} # 去掉前缀，只保留版本号
+    fi
+    echo "检测到最新版本: $VERSION"
+
+    # 拼接文件名和下载地址 (x86_64 架构)
+    FILENAME="tuic-server-${VERSION}-x86_64-unknown-linux-musl"
+    # 增加更多下载源
+    URLS="
+    https://ghproxy.com/https://github.com/tuic-protocol/tuic/releases/download/$TAG/$FILENAME
+    https://github.com/tuic-protocol/tuic/releases/download/$TAG/$FILENAME
+    https://mirror.ghproxy.com/https://github.com/tuic-protocol/tuic/releases/download/$TAG/$FILENAME
+    "
+    SUCCESS=0
+    for url in $URLS; do
+        echo "尝试下载: $url"
+        if wget --timeout=30 --tries=3 --show-progress -O $TEMP_BIN "$url"; then
+            # 检查文件大小，如果太小可能是错误页面
+            FILE_SIZE=$(stat -c %s $TEMP_BIN)
+            if [ $FILE_SIZE -lt 100000 ]; then
+                echo "警告: 下载的文件过小 ($FILE_SIZE 字节)，可能不是有效的二进制文件，尝试下一个源"
+                continue
+            fi
+            # 检查文件类型
+            FILE_TYPE=$(file $TEMP_BIN)
+            echo "文件类型: $FILE_TYPE"
+            # 更宽松的文件类型检查
+            if echo "$FILE_TYPE" | grep -q "ELF"; then
+                echo "✓ 文件类型检查通过"
+                mv $TEMP_BIN $TUIC_BIN
+                chmod +x $TUIC_BIN
+                SUCCESS=1
+                break
+            else
+                echo "警告: 下载的文件不是 ELF 格式，尝试下一个源"
+            fi
         fi
     done
-    if [ ${#missing[@]} -eq 0 ]; then
-        echo "✅ 所有依赖已安装"
-        return
-    fi
-    echo "⚠️ 缺少依赖: ${missing[*]}，正在安装..."
-    if [ -f /etc/debian_version ]; then
-        apt update -y
-        apt install -y curl jq openssl lsof net-tools iproute2
-    elif [ -f /etc/alpine-release ]; then
-        apk update
-        apk add curl jq openssl lsof net-tools iproute2
-    elif [ -f /etc/redhat-release ]; then
-        yum install -y curl jq openssl lsof net-tools iproute
-    else
-        echo "❌ 未知系统，请手动安装依赖: curl jq openssl lsof net-tools iproute2"
+    if [ $SUCCESS -eq 0 ]; then
+        echo "❌ 所有下载源均失败，请检查网络环境或手动下载。"
+        echo "手动下载指南:"
+        echo "1. 访问 https://github.com/tuic-protocol/tuic/releases/latest"
+        echo "2. 下载 tuic-server-*-x86_64-unknown-linux-musl 文件"
+        echo "3. 将文件上传到服务器并重命名为 $TUIC_BIN"
+        echo "4. 执行: chmod +x $TUIC_BIN"
         exit 1
     fi
-}
-install_deps
-# -------------------------------
-# 端口检测与分配
-# -------------------------------
-is_port_in_use() {
-    local port="$1"
-    if command -v ss >/dev/null 2>&1; then
-        ss -tuln 2>/dev/null | awk '{print $5}' | grep -qE "[:\
+    echo "✓ TUIC 二进制文件下载成功"
+fi
 
-\[]${port}\\]
-
-?$"
-        return $?
-    elif command -v netstat >/dev/null 2>&1; then
-        netstat -tuln 2>/dev/null | awk '{print $4}' | grep -qE "[:\
-
-\[]${port}\\]
-
-?$"
-        return $?
-    elif command -v lsof >/dev/null 2>&1; then
-        lsof -i :"$port" -sTCP:LISTEN -n 2>/dev/null | grep -q ":$port"
-        return $?
+# ===== 端口检测函数 =====
+is_port_available() {
+    local port=$1
+    if lsof -i :$port >/dev/null 2>&1 || netstat -tuln | grep -q ":$port"; then
+        return 1 # 端口被占用
     else
-        return 1
+        return 0 # 端口可用
     fi
 }
 
-find_free_port() {
-    for ((port=10000; port<=50000; port++)); do
-        if ! is_port_in_use "$port"; then
-            echo "$port"
-            return
+find_available_port() {
+    local start_port=${1:-28543} # 默认起始端口
+    local end_port=${2:-30000}   # 默认结束端口
+    local port
+    
+    for ((port=start_port; port<=end_port; port++)); do
+        if is_port_available $port; then
+            echo $port
+            return 0
         fi
     done
-    echo "❌ 未找到可用端口" >&2
+    
+    echo "❌ 在 $start_port-$end_port 范围内未找到可用端口" >&2
     exit 1
 }
 
-PORT="$(find_free_port)"
-echo "🎯 已自动分配端口：$PORT"
-# -------------------------------
-# 核心功能函数
-# -------------------------------
-generate_certificate() {
-    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
-        -keyout "$KEY_PEM" -out "$CERT_PEM" -subj "/CN=$MASQ_DOMAIN" -days 825 -nodes >/dev/null 2>&1
-}
+# ===== 证书处理 =====
+CERT_DIR="/etc/tuic"
+mkdir -p $CERT_DIR
 
-download_tuic() {
-    local tag filename url version
-    tag="$(curl -fsSL https://api.github.com/repos/tuic-protocol/tuic/releases/latest | jq -r .tag_name)"
-    version="${tag#tuic-server-}"
-    filename="tuic-server-${version}-x86_64-unknown-linux-musl"
-    url="https://github.com/tuic-protocol/tuic/releases/download/${tag}/${filename}"
-    curl -fsSL -o "$TUIC_BIN" "$url"
-    chmod +x "$TUIC_BIN"
-}
+read -p "请输入证书 (.crt) 文件绝对路径 (回车则生成自签证书): " CERT_PATH
+if [ -z "$CERT_PATH" ]; then
+    read -p "请输入用于自签证书的伪装域名 (默认 www.bing.com): " FAKE_DOMAIN
+    [ -z "$FAKE_DOMAIN" ] && FAKE_DOMAIN="www.bing.com"
+    echo "正在生成自签证书..."
+    openssl req -x509 -newkey rsa:2048 -nodes -keyout $CERT_DIR/key.pem -out $CERT_DIR/cert.pem -days 365 \
+        -subj "/CN=$FAKE_DOMAIN"
+    CERT_PATH="$CERT_DIR/cert.pem"
+    KEY_PATH="$CERT_DIR/key.pem"
+else
+    read -p "请输入私钥 (.key) 文件绝对路径: " KEY_PATH
+    read -p "请输入证书域名 (SNI): " FAKE_DOMAIN
+fi
 
-generate_user() {
-    local uuid pass
-    uuid="$(cat /proc/sys/kernel/random/uuid)"
-    pass="$(openssl rand -hex 16)"
-    printf '%s\n%s\n' "$uuid" "$pass" > "$USER_FILE"
-}
+# ===== 生成 UUID 和密码 =====
+UUID=$(cat /proc/sys/kernel/random/uuid)
+PASS=$(openssl rand -base64 16)
 
-generate_config() {
-    local uuid pass
-    uuid="$(sed -n '1p' "$USER_FILE")"
-    pass="$(sed -n '2p' "$USER_FILE")"
-    cat > "$SERVER_JSON" <<EOF
+# ===== 自动检测并分配端口 =====
+echo "正在检测可用端口..."
+DEFAULT_PORT=28543
+if is_port_available $DEFAULT_PORT; then
+    PORT=$DEFAULT_PORT
+    echo "✓ 默认端口 $DEFAULT_PORT 可用"
+else
+    echo "默认端口 $DEFAULT_PORT 已被占用，正在寻找可用端口..."
+    PORT=$(find_available_port $DEFAULT_PORT)
+    echo "🎯 已自动分配端口: $PORT"
+fi
+
+# ===== 写配置文件 =====
+CONFIG_FILE="$CERT_DIR/config.json"
+cat > $CONFIG_FILE <<EOF
 {
-  "server": "0.0.0.0:$PORT",
-  "users": {
-    "$uuid": "$pass"
-  },
-  "certificate": "$CERT_PEM",
-  "private_key": "$KEY_PEM",
-  "congestion_control": "bbr",
-  "alpn": ["h3"],
-  "log_level": "info"
-}
-EOF
-}
-generate_links() {
-    local uuid pass enc_pass enc_sni ip country link
-    uuid="$(sed -n '1p' "$USER_FILE")"
-    pass="$(sed -n '2p' "$USER_FILE")"
-    enc_pass="$(printf '%s' "$pass" | jq -s -R -r @uri)"
-    enc_sni="$(printf '%s' "$MASQ_DOMAIN" | jq -s -R -r @uri)"
-    : > "$LINK_FILE"
-    echo "📡 TUIC 节点链接如下："
-    for ip in "$(curl -fsSL ipv4.icanhazip.com)" "$(curl -fsSL ipv6.icanhazip.com)"; do
-        [ -z "$ip" ] && continue
-        [[ "$ip" =~ ":" ]] && ip="[$ip]"
-        country="$(curl -fsSL "http://ip-api.com/line/$ip?fields=countryCode" || echo "XX")"
-        link="tuic://$uuid:$enc_pass@$ip:$PORT?sni=$enc_sni&alpn=h3&congestion_control=bbr#TUIC-${country}"
-        echo "$link" | tee -a "$LINK_FILE"
-    done
-}
-
-export_clients() {
-    local uuid pass ip
-    uuid="$(sed -n '1p' "$USER_FILE")"
-    pass="$(sed -n '2p' "$USER_FILE")"
-    ip="$(curl -fsSL ipv4.icanhazip.com || curl -fsSL ipv6.icanhazip.com || echo 127.0.0.1)"
-    [[ "$ip" =~ ":" ]] && ip="[$ip]"
-    cat > "$WORK_DIR/v2rayn-tuic.json" <<EOF
-{
-  "protocol": "tuic",
-  "tag": "TUIC-bbr",
-  "settings": {
-    "server": "$ip",
-    "server_port": $PORT,
-    "uuid": "$uuid",
-    "password": "$pass",
-    "congestion_control": "bbr",
+    "server": "[::]:$PORT",
+    "users": {
+        "$UUID": "$PASS"
+    },
+    "certificate": "$CERT_PATH",
+    "private_key": "$KEY_PATH",
     "alpn": ["h3"],
-    "sni": "$MASQ_DOMAIN",
-    "udp_relay_mode": "native",
-    "disable_sni": false,
-    "reduce_rtt": true
-  }
+    "congestion_control": "bbr"
 }
 EOF
-}
-install_service() {
-    if command -v openrc-run >/dev/null 2>&1; then
-        cat > /etc/init.d/tuic <<'EOF'
+echo "配置文件已生成: $CONFIG_FILE"
+
+# ===== OpenRC 服务 =====
+SERVICE_FILE="/etc/init.d/tuic"
+cat > $SERVICE_FILE <<'EOF'
 #!/sbin/openrc-run
-command="/etc/tuic/tuic-server"
-command_args="-c /etc/tuic/server.json"
+description="TUIC v5 Service"
+command="/usr/local/bin/tuic"
+command_args="--config /etc/tuic/config.json"
+command_background="yes"
 pidfile="/run/tuic.pid"
-depend() { need net; }
+depend() {
+    need net
+}
 EOF
-        chmod +x /etc/init.d/tuic
-        rc-update add tuic default
-        rc-service tuic restart || rc-service tuic start
-    elif pidof systemd >/dev/null 2>&1; then
-        cat > /etc/systemd/system/tuic.service <<EOF
-[Unit]
-Description=TUIC Server
-After=network.target
+chmod +x $SERVICE_FILE
+rc-update add tuic default
+rc-service tuic restart
 
-[Service]
-ExecStart=$TUIC_BIN -c $SERVER_JSON
-Restart=always
-User=root
+# ===== 输出订阅链接 =====
+ENC_PASS=$(printf '%s' "$PASS" | jq -s -R -r @uri) # URL 编码密码
+IP=$(wget -qO- ipv4.icanhazip.com || wget -qO- ipv6.icanhazip.com)
 
-[Install]
-WantedBy=multi-user.target
-EOF
-        systemctl daemon-reexec
-        systemctl daemon-reload
-        systemctl enable tuic
-        systemctl restart tuic || systemctl start tuic
-    else
-        echo "🚀 未检测到 OpenRC 或 systemd，前台运行 TUIC..."
-        exec "$TUIC_BIN" -c "$SERVER_JSON"
-    fi
-
-    # 检查是否启动成功
-    sleep 2
-    if ! pgrep -x tuic-server >/dev/null 2>&1; then
-        echo "⚠️ TUIC 启动失败，可能端口被占用，尝试更换端口..."
-        PORT="$(find_free_port)"
-        generate_config
-        generate_links
-        export_clients
-        if command -v rc-service >/dev/null 2>&1; then
-            rc-service tuic restart
-        elif command -v systemctl >/dev/null 2>&1; then
-            systemctl restart tuic
-        fi
-        echo "✅ 已自动切换到新端口：$PORT"
-    else
-        echo "✅ TUIC 服务已启动"
-    fi
-}
-
-
-modify_port() {
-    local new_port
-    read -p "请输入新端口号（10000–50000）: " new_port
-    if [[ "$new_port" =~ ^[0-9]+$ ]] && (( new_port >= 10000 && new_port <= 50000 )); then
-        if is_port_in_use "$new_port"; then
-            echo "❌ 端口 $new_port 已被占用，请选择其他端口"
-            return
-        fi
-        PORT="$new_port"
-        echo "🎯 新端口已设置为：$PORT"
-        generate_config
-        generate_links
-        export_clients
-        if command -v rc-service >/dev/null 2>&1; then
-            rc-service tuic restart || echo "⚠️ 请手动重启 TUIC"
-        elif command -v systemctl >/dev/null 2>&1; then
-            systemctl restart tuic || echo "⚠️ 请手动重启 TUIC"
-        fi
-        echo "✅ 配置已更新，服务已重启"
-    else
-        echo "❌ 无效端口，请输入 10000–50000 范围内的数字"
-    fi
-}
-
-uninstall_tuic() {
-    local backup_dir
-    backup_dir="/etc/tuic-backup-$(date +%s)"
-    mkdir -p "$backup_dir"
-    cp -r "$WORK_DIR" "$backup_dir" 2>/dev/null || true
-
-    if command -v rc-service >/dev/null 2>&1; then
-        rc-service tuic stop || true
-        rc-update del tuic default || true
-        rm -f /etc/init.d/tuic
-    elif command -v systemctl >/dev/null 2>&1; then
-        systemctl stop tuic || true
-        systemctl disable tuic || true
-        rm -f /etc/systemd/system/tuic.service
-        systemctl daemon-reload || true
-    fi
-
-    rm -rf "$WORK_DIR"
-    echo "✅ TUIC 已卸载，配置备份于 $backup_dir"
-}
-
-show_info() {
-    echo "---------------------------------------"
-    echo "📄 节点链接:"
-    [ -f "$LINK_FILE" ] && cat "$LINK_FILE" || echo "尚未生成链接"
-    echo "📦 v2rayN 配置: $WORK_DIR/v2rayn-tuic.json"
-    echo "📦 Clash 配置: $WORK_DIR/clash-tuic.yaml"
-    echo "🔑 UUID: $(sed -n '1p' "$USER_FILE" 2>/dev/null || echo N/A)"
-    echo "🔑 密码: $(sed -n '2p' "$USER_FILE" 2>/dev/null || echo N/A)"
-    echo "🎭 SNI: $MASQ_DOMAIN"
-    echo "🔌 端口: $PORT"
-    echo "📁 配置文件: $SERVER_JSON"
-    echo "---------------------------------------"
-}
-copy_to_clipboard() {
-    if command -v xclip >/dev/null 2>&1; then
-        head -n 1 "$LINK_FILE" | xclip -selection clipboard
-        echo "📋 节点链接已复制到剪贴板 (xclip)"
-    elif command -v pbcopy >/dev/null 2>&1; then
-        head -n 1 "$LINK_FILE" | pbcopy
-        echo "📋 节点链接已复制到剪贴板 (pbcopy)"
-    else
-        echo "⚠️ 未检测到剪贴板工具 (xclip/pbcopy)，请手动复制 $LINK_FILE 中的链接"
-    fi
-}
-
-do_install() {
-    generate_certificate
-    download_tuic
-    generate_user
-    generate_config
-    generate_links
-    export_clients
-    install_service
-    show_info
-    copy_to_clipboard
-}
-
-main_menu() {
-    while true; do
-        echo "---------------------------------------"
-        echo " TUIC 一键部署脚本（终极增强版）"
-        echo "---------------------------------------"
-        echo "1) 安装 TUIC 服务"
-        echo "2) 查看节点信息"
-        echo "3) 修改端口"
-        echo "4) 卸载 TUIC"
-        echo "5) 退出"
-        read -p "请输入选项 [1-5]: " CHOICE
-
-        case "$CHOICE" in
-            1) do_install ;;
-            2) show_info ;;
-            3) modify_port ;;
-            4) uninstall_tuic ;;
-            5) echo "👋 再见"; exit 0 ;;
-            *) echo "❌ 无效选项";;
-        esac
-    done
-}
-
-main_menu
+echo "------------------------------------------------------------------------"
+echo " TUIC 安装和配置完成！"
+echo "------------------------------------------------------------------------"
+echo "服务器地址: $IP"
+echo "端口: $PORT"
+echo "UUID: $UUID"
+echo "密码: $PASS"
+echo "SNI: $FAKE_DOMAIN"
+echo "证书路径: $CERT_PATH"
+echo "私钥路径: $KEY_PATH"
+echo "------------------------------------------------------------------------"
+echo "TUIC 订阅链接:"
+echo "tuic://$UUID:$ENC_PASS@$IP:$PORT?sni=$FAKE_DOMAIN&alpn=h3&congestion_control=bbr"
+echo "------------------------------------------------------------------------"

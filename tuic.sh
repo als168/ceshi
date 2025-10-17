@@ -45,12 +45,15 @@ generate_config() {
     cat > "$SERVER_TOML" <<EOF
 log_level = "off"
 server = "0.0.0.0:$PORT"
+
 [users]
-$UUID = "$PASS"
+"$UUID" = "$PASS"
+
 [tls]
 certificate = "$CERT_PEM"
 private_key = "$KEY_PEM"
 alpn = ["h3"]
+
 [quic]
 congestion_control = "bbr"
 EOF
@@ -172,7 +175,7 @@ show_info() {
 
 main_menu() {
     echo "---------------------------------------"
-    echo " TUIC 一键部署脚本（最终优化版）"
+    echo " TUIC 一键部署脚本（最终修复版）"
     echo "---------------------------------------"
     echo "请选择操作:"
     echo "1) 安装 TUIC 服务"

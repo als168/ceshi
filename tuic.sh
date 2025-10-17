@@ -5,31 +5,15 @@ IFS=$'\n\t'
 WORK_DIR="/etc/tuic"
 mkdir -p "$WORK_DIR"
 
+MASQ_DOMAINS=("www.microsoft.com" "www.cloudflare.com" "www.bing.com" "www.apple.com" "www.amazon.com")
+MASQ_DOMAIN=${MASQ_DOMAINS[$RANDOM % ${#MASQ_DOMAINS[@]}]}
 TUIC_BIN="$WORK_DIR/tuic-server"
 SERVER_JSON="$WORK_DIR/server.json"
 CERT_PEM="$WORK_DIR/tuic-cert.pem"
 KEY_PEM="$WORK_DIR/tuic-key.pem"
 USER_FILE="$WORK_DIR/tuic_user.txt"
 LINK_FILE="$WORK_DIR/tuic-link.txt"
-
-MASQ_DOMAINS=(
-  "www.microsoft.com"
-  "www.cloudflare.com"
-  "www.bing.com"
-  "www.apple.com"
-  "www.amazon.com"
-  "www.google.com"
-  "www.youtube.com"
-  "www.facebook.com"
-  "www.yahoo.com"
-  "www.wikipedia.org"
-)
-
-read -p "请输入监听端口（默认 28888）: " INPUT_PORT
-PORT="${INPUT_PORT:-28888}"
-CONGESTION="bbr"
-MASQ_DOMAIN=${MASQ_DOMAINS[$RANDOM % ${#MASQ_DOMAINS[@]}]}
-echo "🎭 已随机选择伪装域名：$MASQ_DOMAIN"
+PORT="28888"
 
 generate_certificate() {
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
@@ -63,7 +47,7 @@ generate_config() {
   },
   "certificate": "$CERT_PEM",
   "private_key": "$KEY_PEM",
-  "congestion_control": "$CONGESTION",
+  "congestion_control": "bbr",
   "alpn": ["h3"],
   "log_level": "info"
 }
@@ -76,35 +60,65 @@ generate_links() {
     ENC_PASS=$(printf '%s' "$PASS" | jq -s -R -r @uri)
     ENC_SNI=$(printf '%s' "$MASQ_DOMAIN" | jq -s -R -r @uri)
     > "$LINK_FILE"
-
     echo "📡 TUIC 节点链接如下："
 
-    detect_country() {
-        local ip="$1"
-        curl -s --max-time 5 "http://ip-api.com/line/$ip?fields=countryCode" || echo "XX"
-    }
-
-    IPV4=$(curl -s --max-time 5 ipv4.icanhazip.com || echo "")
-    IPV6=$(curl -s --max-time 5 ipv6.icanhazip.com || echo "")
-
-    if [[ -n "$IPV4" ]]; then
-        COUNTRY=$(detect_country "$IPV4")
-        LINK="tuic://$UUID:$ENC_PASS@$IPV4:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=$CONGESTION#TUIC-IPv4-${COUNTRY}"
+    for ip in $(curl -s ipv4.icanhazip.com; curl -s ipv6.icanhazip.com); do
+        [[ "$ip" =~ ":" ]] && ip="[$ip]"
+        COUNTRY=$(curl -s "http://ip-api.com/line/$ip?fields=countryCode" || echo "XX")
+        [[ "$COUNTRY" == "XX" ]] && echo "⚠️ 无法识别 IP 所属国家，已使用默认标识"
+        LINK="tuic://$UUID:$ENC_PASS@$ip:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=bbr#TUIC-${COUNTRY}"
         echo "$LINK" | tee -a "$LINK_FILE"
-    fi
+    done
+}
 
-    if [[ -n "$IPV6" ]]; then
-        COUNTRY=$(detect_country "$IPV6")
-        LINK="tuic://$UUID:$ENC_PASS@[$IPV6]:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=$CONGESTION#TUIC-IPv6-${COUNTRY}"
-        echo "$LINK" | tee -a "$LINK_FILE"
-    fi
+export_clients() {
+    UUID=$(sed -n '1p' "$USER_FILE")
+    PASS=$(sed -n '2p' "$USER_FILE")
+    IP=$(curl -s ipv4.icanhazip.com || curl -s ipv6.icanhazip.com)
+    [[ "$IP" =~ ":" ]] && IP="[$IP]"
+    cat > "$WORK_DIR/v2rayn-tuic.json" <<EOF
+{
+  "protocol": "tuic",
+  "tag": "TUIC-bbr",
+  "settings": {
+    "server": "$IP",
+    "server_port": $PORT,
+    "uuid": "$UUID",
+    "password": "$PASS",
+    "congestion_control": "bbr",
+    "alpn": ["h3"],
+    "sni": "$MASQ_DOMAIN",
+    "udp_relay_mode": "native",
+    "disable_sni": false,
+    "reduce_rtt": true
+  }
+}
+EOF
 
-    if [[ -z "$IPV4" && -z "$IPV6" ]]; then
-        echo "⚠️ 无法检测到公网 IP，请检查 VPS 网络连接"
-    fi
+    cat > "$WORK_DIR/clash-tuic.yaml" <<EOF
+proxies:
+  - name: "TUIC-bbr"
+    type: tuic
+    server: $IP
+    port: $PORT
+    uuid: "$UUID"
+    password: "$PASS"
+    alpn: ["h3"]
+    sni: "$MASQ_DOMAIN"
+    congestion_control: bbr
+    udp_relay_mode: native
+    skip-cert-verify: true
+    disable_sni: false
+    reduce_rtt: true
+EOF
 }
 
 install_service() {
+    if ss -ulpn | grep -q ":$PORT"; then
+        echo "⚠️ 端口 $PORT 已被占用，请修改端口或停止冲突进程"
+        exit 1
+    fi
+
     if pidof systemd >/dev/null; then
         cat > /etc/systemd/system/tuic.service <<EOF
 [Unit]
@@ -138,6 +152,9 @@ EOF
         echo "🚀 TUIC 正在前台运行..."
         exec "$TUIC_BIN" -c "$SERVER_JSON"
     fi
+
+    echo "✅ TUIC 服务已启动，以下是你的节点链接："
+    cat "$LINK_FILE"
 }
 
 # 主流程
@@ -146,4 +163,5 @@ download_tuic
 generate_user
 generate_config
 generate_links
+export_clients
 install_service

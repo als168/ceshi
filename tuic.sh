@@ -1,189 +1,205 @@
-#!/bin/bash
+#!/bin/sh
 set -e
 
+TUIC_BIN="/usr/local/bin/tuic"
 CERT_DIR="/etc/tuic"
-WORK_DIR="$CERT_DIR"
-CONFIG_FILE="$WORK_DIR/config.json"
-USER_FILE="$WORK_DIR/tuic_user.txt"
-LINK_FILE="$WORK_DIR/tuic-links.txt"
-SERVICE="tuic"
+CONFIG_FILE="$CERT_DIR/config.json"
+SERVICE_FILE="/etc/init.d/tuic"
 
-MASQ_DOMAINS=("www.microsoft.com" "www.cloudflare.com" "www.bing.com" "www.apple.com" "www.amazon.com" "www.wikipedia.org")
-FAKE_DOMAIN=${MASQ_DOMAINS[$RANDOM % ${#MASQ_DOMAINS[@]}]}
-
-mkdir -p "$WORK_DIR"
-
-# ---------------- 管理菜单 ----------------
-if [ -x "$WORK_DIR/tuic-server" ]; then
+# ===== 管理菜单 =====
+if [ -x "$TUIC_BIN" ]; then
   echo "---------------------------------------"
-  echo " TUIC 管理菜单"
+  echo " 检测到已安装 TUIC v5"
   echo "---------------------------------------"
+  echo "请选择操作:"
   echo "1) 修改端口"
-  echo "2) 重启服务"
+  echo "2) 卸载 TUIC"
   echo "3) 查看节点信息"
-  echo "4) 卸载 TUIC"
-  echo "5) 退出"
-  read -p "请输入选项 [1-5]: " choice
+  echo "4) 退出"
+  read -p "请输入选项 [1-4]: " choice
 
   case "$choice" in
     1)
       read -p "请输入新的端口号: " NEW_PORT
       [ -z "$NEW_PORT" ] && echo "❌ 端口不能为空" && exit 1
       sed -i "s/\"server\": \".*\"/\"server\": \"[::]:$NEW_PORT\"/" "$CONFIG_FILE"
-      if command -v systemctl >/dev/null 2>&1; then
-        systemctl restart $SERVICE
-      else
-        pkill -f "$WORK_DIR/tuic-server" || true
-        nohup $WORK_DIR/tuic-server -c $CONFIG_FILE >/dev/null 2>&1 &
-      fi
+      rc-service tuic restart
       echo "✅ 端口已修改为 $NEW_PORT 并已重启服务"
       exit 0
       ;;
     2)
-      if command -v systemctl >/dev/null 2>&1; then
-        systemctl restart $SERVICE
-      else
-        pkill -f "$WORK_DIR/tuic-server" || true
-        nohup $WORK_DIR/tuic-server -c $CONFIG_FILE >/dev/null 2>&1 &
-      fi
-      echo "✅ TUIC 服务已重启"
-      exit 0
-      ;;
-    3)
-      cat "$LINK_FILE"
-      exit 0
-      ;;
-    4)
       echo "正在卸载 TUIC..."
-      if command -v systemctl >/dev/null 2>&1; then
-        systemctl stop $SERVICE || true
-        systemctl disable $SERVICE || true
-        rm -f /etc/systemd/system/$SERVICE.service
-        systemctl daemon-reload
-      else
-        sed -i '/tuic-server/d' /etc/rc.local || true
-        pkill -f "$WORK_DIR/tuic-server" || true
-      fi
-      rm -rf "$WORK_DIR"
+      rc-service tuic stop || true
+      rc-update del tuic default || true
+      rm -f "$TUIC_BIN" "$SERVICE_FILE"
+      rm -rf "$CERT_DIR"
       echo "✅ TUIC 已卸载完成"
       exit 0
       ;;
-    5) echo "已退出"; exit 0 ;;
+    3)
+      cat "$CERT_DIR/tuic-links.txt"
+      exit 0
+      ;;
+    4) echo "已退出"; exit 0 ;;
     *) echo "无效选项"; exit 1 ;;
   esac
 fi
 
-# ---------------- 用户信息持久化 ----------------
-if [ -f "$USER_FILE" ]; then
-  UUID=$(sed -n '1p' "$USER_FILE")
-  PASS=$(sed -n '2p' "$USER_FILE")
-else
-  UUID=$(cat /proc/sys/kernel/random/uuid)
-  PASS=$(openssl rand -base64 16)
-  echo "$UUID" > "$USER_FILE"
-  echo "$PASS" >> "$USER_FILE"
-fi
+# ===== 安装流程 =====
+echo "---------------------------------------"
+echo " TUIC v5 Alpine Linux 安装脚本 "
+echo "---------------------------------------"
 
-# ---------------- 下载 TUIC ----------------
-ARCH=$(uname -m)
-if [ "$ARCH" = "x86_64" ]; then
-  TAG=$(curl -s https://api.github.com/repos/tuic-protocol/tuic/releases/latest | jq -r .tag_name)
-  VERSION=${TAG#tuic-server-}
-  TUIC_URL="https://github.com/tuic-protocol/tuic/releases/download/$TAG/tuic-server-${VERSION}-x86_64-unknown-linux-musl"
-else
-  echo "❌ 暂不支持架构: $ARCH"
-  exit 1
-fi
+apk add --no-cache wget curl openssl openrc lsof coreutils jq file >/dev/null
+apk add --no-cache aria2 >/dev/null || true
 
-wget -O "$WORK_DIR/tuic-server" "$TUIC_URL" || { echo "❌ 下载 TUIC 失败"; exit 1; }
-chmod +x "$WORK_DIR/tuic-server"
+# ===== 下载 TUIC 二进制 =====
+TAG=$(curl -s https://api.github.com/repos/tuic-protocol/tuic/releases/latest | jq -r .tag_name)
+[ -z "$TAG" ] || [ "$TAG" = "null" ] && TAG="tuic-server-1.0.0"
+VERSION=${TAG#tuic-server-}
+FILENAME="tuic-server-${VERSION}-x86_64-unknown-linux-musl"
 
-# ---------------- 证书检查 ----------------
-CERT_PEM="$WORK_DIR/tuic-cert.pem"
-KEY_PEM="$WORK_DIR/tuic-key.pem"
-if [ ! -f "$CERT_PEM" ] || ! openssl x509 -checkend 0 -noout -in "$CERT_PEM" >/dev/null 2>&1; then
-  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
-    -keyout "$KEY_PEM" -out "$CERT_PEM" -subj "/CN=$FAKE_DOMAIN" -days 825 -nodes >/dev/null 2>&1
-fi
+URLS="
+https://github.com/tuic-protocol/tuic/releases/download/$TAG/$FILENAME
+https://mirror.ghproxy.com/https://github.com/tuic-protocol/tuic/releases/download/$TAG/$FILENAME
+"
 
-# ---------------- 拥塞控制算法检测 ----------------
-detect_cc_algo() {
-  if sysctl net.ipv4.tcp_available_congestion_control >/dev/null 2>&1; then
-    SUPPORTED=$(sysctl -n net.ipv4.tcp_available_congestion_control)
-  else
-    SUPPORTED="cubic reno"
+SUCCESS=0
+for url in $URLS; do
+  echo "尝试下载: $url"
+  rm -f /tmp/tuic_temp*
+  wget --timeout=30 --tries=3 -O /tmp/tuic_temp "$url" || continue
+  FILE_TYPE=$(file /tmp/tuic_temp)
+  if echo "$FILE_TYPE" | grep -q "ELF"; then
+    mv /tmp/tuic_temp $TUIC_BIN
+    chmod +x $TUIC_BIN
+    SUCCESS=1
+    break
   fi
-  if echo "$SUPPORTED" | grep -qw "bbr2"; then
-    CC_ALGO="bbr2"
-  elif echo "$SUPPORTED" | grep -qw "bbr"; then
-    CC_ALGO="bbr"
-  else
-    CC_ALGO="cubic"
-  fi
-}
-detect_cc_algo
+done
+[ $SUCCESS -eq 0 ] && echo "❌ 下载失败" && exit 1
 
-# ---------------- 生成配置 ----------------
-PORT=$(shuf -i 20000-60000 -n 1)
+# ===== 证书处理 =====
+mkdir -p $CERT_DIR
+read -p "请输入证书 (.crt) 文件绝对路径 (回车则生成自签证书): " CERT_PATH
+if [ -z "$CERT_PATH" ]; then
+  read -p "请输入伪装域名 (默认 www.bing.com): " FAKE_DOMAIN
+  [ -z "$FAKE_DOMAIN" ] && FAKE_DOMAIN="www.bing.com"
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout $CERT_DIR/key.pem -out $CERT_DIR/cert.pem -days 825 \
+    -subj "/CN=$FAKE_DOMAIN"
+  CERT_PATH="$CERT_DIR/cert.pem"
+  KEY_PATH="$CERT_DIR/key.pem"
+else
+  read -p "请输入私钥 (.key) 文件绝对路径: " KEY_PATH
+  read -p "请输入证书域名 (SNI): " FAKE_DOMAIN
+fi
+
+# ===== 生成配置 =====
+UUID=$(cat /proc/sys/kernel/random/uuid)
+PASS=$(openssl rand -base64 16)
+[ -z "$FAKE_DOMAIN" ] && FAKE_DOMAIN="www.bing.com"
+
+read -p "请输入 TUIC 端口 (默认随机): " PORT
+[ -z "$PORT" ] && PORT=$(shuf -i 20000-60000 -n 1)
+
+# ===== 拥塞算法选择 =====
+echo "请选择拥塞控制算法:"
+echo "1) bbr (推荐: 丢包多/跨境线路)"
+echo "2) cubic (推荐: 稳定小鸡/低丢包环境)"
+read -p "请输入选项 [1-2] (默认 1): " CC_CHOICE
+case "$CC_CHOICE" in
+  2) CC_ALGO="cubic" ;;
+  *) CC_ALGO="bbr" ;;
+esac
+echo "已选择拥塞算法: $CC_ALGO"
+
 cat > $CONFIG_FILE <<EOF
 {
   "server": "[::]:$PORT",
   "users": {
     "$UUID": "$PASS"
   },
-  "certificate": "$CERT_PEM",
-  "private_key": "$KEY_PEM",
+  "certificate": "$CERT_PATH",
+  "private_key": "$KEY_PATH",
   "alpn": ["h3"],
   "congestion_control": "$CC_ALGO"
 }
 EOF
 
-# ---------------- 输出链接 ----------------
-IPV4=$(curl -s ipv4.icanhazip.com || true)
-IPV6=$(curl -s ipv6.icanhazip.com || true)
+# ===== OpenRC 服务 =====
+cat > $SERVICE_FILE <<'EOF'
+#!/sbin/openrc-run
+description="TUIC v5 Service"
+command="/usr/local/bin/tuic"
+command_args="--config /etc/tuic/config.json"
+command_background="yes"
+pidfile="/run/tuic.pid"
+depend() { need net; }
+EOF
+
+chmod +x $SERVICE_FILE
+rc-update add tuic default
+rc-service tuic restart
+
+# ===== 获取公网 IP =====
+IPV4=$(wget -qO- -T 5 ipv4.icanhazip.com)
+IPV6=$(wget -qO- -T 5 ipv6.icanhazip.com)
+[ -n "$IPV6" ] && IP6_URI="[$IPV6]"
+
+# ===== URI 编码 =====
 ENC_PASS=$(printf '%s' "$PASS" | jq -s -R -r @uri)
 ENC_SNI=$(printf '%s' "$FAKE_DOMAIN" | jq -s -R -r @uri)
 
-> "$LINK_FILE"
-
-if [ -n "$IPV6" ]; then
-  COUNTRY6=$(curl -s "http://ip-api.com/line/${IPV6}?fields=countryCode" || true)
-  [ -z "$COUNTRY6" ] && COUNTRY6="XX"
-  LINK6="tuic://$UUID:$ENC_PASS@[$IPV6]:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=$CC_ALGO#TUIC-${COUNTRY6}-IPv6-$CC_ALGO"
-  echo "$LINK6" >> "$LINK_FILE"
-  echo "IPv6 节点: $LINK6"
-fi
+# ===== 输出单节点链接 =====
+LINK_FILE="$CERT_DIR/tuic-links.txt"
+{
+  echo "UUID: $UUID"
+  echo "密码: $PASS"
+  echo "SNI: $FAKE_DOMAIN"
+  echo "端口: $PORT"
+  echo "拥塞算法: $CC_ALGO"
+} > $LINK_FILE
 
 if [ -n "$IPV4" ]; then
-  COUNTRY4=$(curl -s "http://ip-api.com/line/${IPV4}?fields=countryCode" || true)
-  [ -z "$COUNTRY4" ] && COUNTRY4="XX"
-  LINK4="tuic://$UUID:$ENC_PASS@$IPV4:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=$CC_ALGO#TUIC-${COUNTRY4}-IPv4-$CC_ALGO"
-  echo "$LINK4" >> "$LINK_FILE"
-  echo "IPv4 节点: $LINK4"
+  LINK4="tuic://$UUID:$ENC_PASS@$IPV4:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=$CC_ALGO#TUIC-IPv4-$CC_ALGO"
+  echo "单节点链接 (IPv4): $LINK4"
+  echo "$LINK4" >> $LINK_FILE
 fi
 
-ln -sf "$LINK_FILE" /root/tuic-links.txt
+if [ -n "$IPV6" ]; then
+  LINK6="tuic://$UUID:$ENC_PASS@$IP6_URI:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=$CC_ALGO#TUIC-IPv6-$CC_ALGO"
+  echo "单节点链接 (IPv6): $LINK6"
+  echo "$LINK6" >> $LINK_FILE
+fi
 
-# ---------------- 服务管理 ----------------
-if command -v systemctl >/dev/null 2>&1; then
-  echo "检测到 systemd，使用 systemd 管理 TUIC 服务"
-  mkdir -p /etc/systemd/system
-  cat > /etc/systemd/system/$SERVICE.service <<EOF
-[Unit]
-Description=TUIC Server
-After=network.target
+ln -sf $LINK_FILE /root/tuic-links.txt
+echo "✅ 所有链接已保存到: $LINK_FILE"
+echo "快捷访问: ~/tuic-links.txt"
 
-[Service]
-ExecStart=$WORK_DIR/tuic-server -c $CONFIG_FILE
-Restart=on-failure
-LimitNOFILE=65535
-
-[Install]
-WantedBy=multi-user.target
+# ===== 生成 v2rayN 节点配置 =====
+V2RAYN_FILE="$CERT_DIR/v2rayn-tuic.json"
+cat > $V2RAYN_FILE <<EOF
+{
+  "protocol": "tuic",
+  "tag": "TUIC-$CC_ALGO",
+  "settings": {
+    "server": "${IPV4:-$IPV6}",
+    "server_port": $PORT,
+    "uuid": "$UUID",
+    "password": "$PASS",
+    "congestion_control": "$CC_ALGO",
+    "alpn": ["h3"],
+    "sni": "$FAKE_DOMAIN",
+    "udp_relay_mode": "native",
+    "disable_sni": false,
+    "reduce_rtt": true
+  }
+}
 EOF
-  systemctl daemon-reload
-  systemctl enable --now $SERVICE
-else
-  echo "未检测到 systemd，使用 rc.local 启动 TUIC"
-  if ! grep -q "tuic-server" /etc/rc.local 2>/dev/null; then
-    echo "$WORK_DIR/tuic-server
+
+# ===== 生成 Clash Meta 配置 =====
+CLASH_FILE="$CERT_DIR/clash-tuic.yaml"
+cat > $CLASH_FILE <<EOF
+proxies:
+  - name: "TUIC-${CC_ALGO}"
+    type: tuic

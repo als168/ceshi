@@ -8,7 +8,7 @@ mkdir -p "$WORK_DIR"
 MASQ_DOMAINS=("www.microsoft.com" "www.cloudflare.com" "www.bing.com" "www.apple.com" "www.amazon.com")
 MASQ_DOMAIN=${MASQ_DOMAINS[$RANDOM % ${#MASQ_DOMAINS[@]}]}
 TUIC_BIN="$WORK_DIR/tuic-server"
-SERVER_TOML="$WORK_DIR/server.toml"
+SERVER_JSON="$WORK_DIR/server.json"
 CERT_PEM="$WORK_DIR/tuic-cert.pem"
 KEY_PEM="$WORK_DIR/tuic-key.pem"
 USER_FILE="$WORK_DIR/tuic_user.txt"
@@ -39,7 +39,7 @@ generate_user() {
 generate_config() {
     UUID=$(sed -n '1p' "$USER_FILE")
     PASS=$(sed -n '2p' "$USER_FILE")
-    cat > "$WORK_DIR/server.json" <<EOF
+    cat > "$SERVER_JSON" <<EOF
 {
   "server": "0.0.0.0:$PORT",
   "users": {
@@ -54,17 +54,10 @@ generate_config() {
 EOF
 }
 
-
-
 validate_config() {
-    grep -q '^
-
-\[users\]
-
-$' "$SERVER_TOML" || { echo "❌ 配置文件缺少 [users] 部分"; exit 1; }
-    grep -q "$CERT_PEM" "$SERVER_TOML" || { echo "❌ TLS 证书路径未正确写入配置"; exit 1; }
+    jq -e '.users' "$SERVER_JSON" >/dev/null || { echo "❌ 配置文件缺少 users 部分"; exit 1; }
+    grep -q "$CERT_PEM" "$SERVER_JSON" || { echo "❌ TLS 证书路径未正确写入配置"; exit 1; }
 }
-
 
 generate_links() {
     UUID=$(sed -n '1p' "$USER_FILE")
@@ -129,7 +122,7 @@ Description=TUIC Server
 After=network.target
 
 [Service]
-ExecStart=$TUIC_BIN -c $SERVER_TOML
+ExecStart=$TUIC_BIN -c $SERVER_JSON
 Restart=always
 User=root
 
@@ -144,7 +137,7 @@ EOF
         cat > /etc/init.d/tuic <<EOF
 #!/sbin/openrc-run
 command="$TUIC_BIN"
-command_args="-c $SERVER_TOML"
+command_args="-c $SERVER_JSON"
 pidfile="/run/tuic.pid"
 depend() { need net; }
 EOF
@@ -153,7 +146,7 @@ EOF
         rc-service tuic start
     else
         echo "🚀 TUIC 正在前台运行..."
-        exec "$TUIC_BIN" -c "$SERVER_TOML"
+        exec "$TUIC_BIN" -c "$SERVER_JSON"
     fi
 }
 
@@ -187,12 +180,12 @@ show_info() {
     echo "📦 Clash 配置: $WORK_DIR/clash-tuic.yaml"
     echo "🔑 UUID: $(sed -n '1p' "$USER_FILE")"
     echo "🔑 密码: $(sed -n '2p' "$USER_FILE")"
-    echo "📁 配置文件: $SERVER_TOML"
+    echo "📁 配置文件: $SERVER_JSON"
 }
 
 main_menu() {
     echo "---------------------------------------"
-    echo " TUIC 一键部署脚本（修复版）"
+    echo " TUIC 一键部署脚本（TUIC 1.0.0 修复版）"
     echo "---------------------------------------"
     echo "请选择操作:"
     echo "1) 安装 TUIC 服务"

@@ -65,12 +65,34 @@ generate_links() {
     ENC_PASS=$(printf '%s' "$PASS" | jq -s -R -r @uri)
     ENC_SNI=$(printf '%s' "$MASQ_DOMAIN" | jq -s -R -r @uri)
     > "$LINK_FILE"
-    for ip in $(curl -s ipv4.icanhazip.com; curl -s ipv6.icanhazip.com); do
-        COUNTRY=$(curl -s "http://ip-api.com/line/$ip?fields=countryCode" || echo "XX")
-        LINK="tuic://$UUID:$ENC_PASS@$ip:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=bbr#TUIC-${COUNTRY}"
-        echo "$LINK" >> "$LINK_FILE"
-    done
+
+    echo "📡 TUIC 节点链接如下："
+
+    detect_country() {
+        local ip="$1"
+        curl -s --max-time 5 "http://ip-api.com/line/$ip?fields=countryCode" || echo "XX"
+    }
+
+    IPV4=$(curl -s --max-time 5 ipv4.icanhazip.com || echo "")
+    IPV6=$(curl -s --max-time 5 ipv6.icanhazip.com || echo "")
+
+    if [[ -n "$IPV4" ]]; then
+        COUNTRY=$(detect_country "$IPV4")
+        LINK="tuic://$UUID:$ENC_PASS@$IPV4:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=bbr#TUIC-IPv4-${COUNTRY}"
+        echo "$LINK" | tee -a "$LINK_FILE"
+    fi
+
+    if [[ -n "$IPV6" ]]; then
+        COUNTRY=$(detect_country "$IPV6")
+        LINK="tuic://$UUID:$ENC_PASS@[$IPV6]:$PORT?sni=$ENC_SNI&alpn=h3&congestion_control=bbr#TUIC-IPv6-${COUNTRY}"
+        echo "$LINK" | tee -a "$LINK_FILE"
+    fi
+
+    if [[ -z "$IPV4" && -z "$IPV6" ]]; then
+        echo "⚠️ 无法检测到公网 IP，请检查 VPS 网络连接"
+    fi
 }
+
 
 export_clients() {
     UUID=$(sed -n '1p' "$USER_FILE")

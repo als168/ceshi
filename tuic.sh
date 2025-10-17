@@ -1,5 +1,4 @@
 #!/bin/bash
-# TUIC 一键部署脚本（旗舰增强版）
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -192,7 +191,7 @@ show_info() {
 
 main_menu() {
     echo "---------------------------------------"
-    echo " TUIC 一键部署脚本（旗舰增强版）"
+    echo " TUIC 一键部署脚本（修复版）"
     echo "---------------------------------------"
     echo "请选择操作:"
     echo "1) 安装 TUIC 服务"
